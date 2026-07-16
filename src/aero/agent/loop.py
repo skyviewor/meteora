@@ -70,6 +70,7 @@ _BUILD_TOOLS: set[str] = {
     "download_gfs",
     "download_ifs",
     "download_gefs",
+    "scan_local_files",
     "ensure_runtime_tools",
     "run_shell",
     "write_file",
@@ -207,6 +208,8 @@ def _runtime_tools_already_ready(args: dict) -> bool:
 
 
 def _tool_call_needs_confirmation(tool_name: str, args: dict) -> bool:
+    if tool_name == "scan_local_files":
+        return bool(args.get("confirm"))
     if tool_name == "run_shell":
         return not _is_safe_shell_command(
             str(args.get("command", "")),
@@ -239,6 +242,7 @@ _TOOL_NAME_REPLACEMENTS = {
     "subset_netcdf": "裁剪 NetCDF 文件",
     "inspect_nc": "查看文件详情",
     "inspect_grib2": "查看 GRIB2 文件详情",
+    "scan_local_files": "扫描本地科研数据",
     "search_cds_variables": "查询可用变量",
     "search_cams_variables": "查询 CAMS 变量",
     "get_cams_latest_forecast_cycle": "查询 CAMS 最新可用起报",
@@ -316,6 +320,7 @@ _TOOL_PROGRESS_MESSAGES = {
         "GRIB2 文件内容查看完成",
         "查看 GRIB2 文件内容失败",
     ),
+    "scan_local_files": ("正在扫描本地科研数据", "本地数据扫描完成", "本地数据扫描失败"),
     "search_cds_variables": ("正在查询可用变量", "可用变量查询完成", "查询可用变量失败"),
     "search_cams_variables": (
         "正在查询 CAMS 可用变量",
@@ -1590,6 +1595,7 @@ def _tool_start_message(tool_name: str) -> str:
         "ensure_runtime_tools": "正在配置运行时命令行工具...",
         "inspect_nc": "正在检查数据文件...",
         "inspect_grib2": "正在检查 GRIB2 文件...",
+        "scan_local_files": "正在扫描本地科研数据...",
         "list_files": "正在查看文件列表...",
         "list_figures": "正在查看图片列表...",
         "delete_file": "正在删除文件...",
@@ -1638,6 +1644,7 @@ def _tool_done_message(tool_name: str) -> str:
         "ensure_runtime_tools": "运行时命令行工具配置完成",
         "inspect_nc": "数据文件检查完成",
         "inspect_grib2": "GRIB2 文件检查完成",
+        "scan_local_files": "本地数据扫描完成",
         "list_files": "文件列表读取完成",
         "list_figures": "图片列表读取完成",
         "delete_file": "文件删除完成",
@@ -1686,6 +1693,7 @@ def _tool_error_prefix(tool_name: str) -> str:
         "ensure_runtime_tools": "运行时命令行工具配置失败",
         "inspect_nc": "数据文件检查失败",
         "inspect_grib2": "GRIB2 文件检查失败",
+        "scan_local_files": "本地数据扫描失败",
         "list_files": "文件列表读取失败",
         "list_figures": "图片列表读取失败",
         "delete_file": "文件删除失败",

@@ -120,7 +120,10 @@ def _lookup_download_record_for_file(path: Path) -> dict | None:
         from aero.data.download_store import CDSDownloadStore
 
         project_dir = find_project_dir()
-        store = CDSDownloadStore(project_dir / "aero_downloads.db")
+        database = project_dir / "aero_downloads.db"
+        if not database.exists():
+            return None
+        store = CDSDownloadStore(database)
         record = store.get_by_file_path(str(path))
         if not record:
             record = store.get_by_file_path(str(path.absolute()))
@@ -246,5 +249,4 @@ async def inspect_grib2(file_path: str) -> dict:
     info["download_record"] = _lookup_download_record_for_file(path)
     info["cfgrib"] = _inspect_grib2_with_cfgrib(path)
     return info
-
 

@@ -1,54 +1,130 @@
 # Aerolytica
-Aerolytica 是一个面向气象与地球科学研究的 AI Agent IDE，帮助研究者从数据获取、算法计算、科研绘图、文献整理到 LaTeX 论文生成，完成端到端的科研工作流。
+
+Aerolytica（命令行工具名：`aero`）是面向气象与地球科学研究的 AI Agent IDE。它将数据发现与下载、文件检查、科研绘图、文献整理、计划管理和报告交付整合在同一个对话式工作流中。
+
+## 能力概览
+
+- **数据发现与获取**：支持检索数据集、变量和站点；下载 ERA5/ERA5-Land、GFS、GEFS、IFS/AIFS、CAMS，以及多种开放观测和卫星数据。
+- **开放数据源**：内置 NOAA ISD、GHCN-Daily、NCEP Reanalysis、HRRR、MRMS、CHIRPS、MERRA-2、JRA-55、JRA-3Q、GOES 和 Himawari 等提供方。
+- **数据检查与处理**：检查 NetCDF、GRIB2、CSV/ISD 和 PDF；支持 NetCDF 时空子集、下载记录查询与失败重试。
+- **科研工作流**：生成并保存研究计划，管理项目指令、文献与 PDF，调用科学绘图技能，并可由子 Agent 执行后台任务。
+- **交互体验**：提供中文优先的 Textual TUI 与纯文本模式，支持流式回复、图像理解、会话持久化、上下文压缩与工具授权确认。
 
 ## 安装
 
+要求 Python 3.12 或更高版本。
+
 ```bash
-git clone https://github.com/skyviewor/aero.git && cd aero
+git clone https://github.com/skyviewor/Aerolytica.git
+cd Aerolytica
 pip install -e ".[dev]"
 ```
 
-## 使用
+也可以使用仓库提供的安装脚本准备运行环境：
+
+```bash
+./install.sh
+```
+
+## 快速开始
+
+在研究项目目录中初始化工作区：
 
 ```bash
 aero init
+```
+
+该命令会创建 `aero.yaml` 及下列目录：
+
+```text
+data/       # 下载与分析数据
+figures/    # 图件
+scripts/tmp/# 临时脚本
+plans/      # 会话计划
+literature/ # 文献与 PDF
+```
+
+启动交互式对话：
+
+```bash
 aero chat
 ```
 
-## 运行测试
+首次启动时，程序会引导配置模型服务商与 API Key；密钥保存于 `~/.aero/secrets.yaml`，不会写入项目的 `aero.yaml`。内置 DeepSeek、阿里云百炼、Kimi 与 OpenAI 的 OpenAI-compatible 配置，也支持在 `aero.yaml` 中自定义兼容服务。
 
-```bash
-pytest tests/ -v
+可以直接提出研究任务，例如：
+
+```text
+下载 2024 年 7 月华北区域的 ERA5 2 米气温，并绘制月平均分布图。
+查找北京站 2023 年 7 月的逐小时观测，检查缺测情况。
+检索近五年关于东亚夏季风与极端降水的文献，保存可获取的 PDF。
 ```
 
 ## 命令
 
 | 命令 | 说明 |
 |---|---|
-| `aero init` | 初始化当前目录，并引导准备 Miniconda 与 `aero-agent` 环境 |
-| `aero chat` | 启动 Textual TUI 对话 |
-| `aero chat --simple` | 启动纯文本对话 |
-| `aero chat --mouse` | 启用 Textual 鼠标滚轮与拖选自动复制 |
-| `↑/↓` 或 `PageUp/PageDown` | 在 TUI 中滚动聊天区域 |
-| `/copy` 或 `Ctrl+Y` | 对话中复制最后一条 Aero 回复到剪贴板 |
-| `/set max_tool_rounds N` | 对话中设置当前会话最大工具调用轮次（默认 20，范围 1-100） |
-| `aero chat --debug-input` | 诊断 Textual 是否收到中文输入事件 |
+| `aero init` | 初始化当前目录的项目配置、工作目录和运行环境 |
+| `aero chat` | 启动 Textual TUI 对话（默认启用鼠标） |
+| `aero chat --simple` | 启动纯文本对话模式（`--no-tui` 为同义选项） |
+| `aero chat --no-mouse` | 禁用 TUI 鼠标模式，使用终端原生选择与复制 |
 | `aero version` | 显示版本号 |
+| `aero help` | 显示命令帮助 |
 
-> **提示**：日常使用 `aero chat` 即可进入 TUI 模式并直接输入中文。多行输入使用 `Shift+Enter`；如果你的终端没有把这个组合键传给应用，可用 `Ctrl+J` 作为换行。
+在对话中可使用以下常用指令：
 
-> **复制文本**：在启用鼠标的 TUI 中，拖选聊天区文字后会自动复制到剪贴板。使用 `--no-mouse` 时由终端处理原生选择和复制。只想复制最后一条回复时，用 `/copy` 或 `Ctrl+Y` 更快。
+| 指令 | 说明 |
+|---|---|
+| `/copy` | 复制最后一条 Aero 回复 |
+| `/model <name>` | 查看或切换当前模型 |
+| `/provider <name>` | 切换模型服务商 |
+| `/variants low\|medium\|high\|max\|auto` | 设置推理强度 |
+| `/theme dark\|light` | 切换 TUI 主题 |
+| `/language zh\|en` | 切换回复语言 |
+| `/set max_tool_rounds N` | 设置当前会话的最大工具调用轮次（默认 999） |
+| `/revoke [tool]` | 查看或撤销某工具的“始终允许”授权 |
+| `/clear`、`/quit` | 清除当前上下文、退出对话 |
 
-## 项目结构
+TUI 中使用 `Shift+Enter` 输入多行；若终端未传递此组合键，可使用 `Ctrl+J` 换行。可用方向键或 `PageUp` / `PageDown` 滚动聊天记录。
 
+## 数据凭据
+
+部分服务需要在对话中按提示配置凭据：
+
+- Copernicus Climate Data Store：ERA5 与 ERA5-Land
+- Copernicus Atmosphere Data Store：CAMS
+- NASA Earthdata：MERRA-2
+
+凭据同样保存在 `~/.aero/secrets.yaml`。无需凭据的开放数据源可以直接由 Agent 查询和下载；实际可用时间范围与产品参数会在请求时确认。
+
+## 开发
+
+运行测试：
+
+```bash
+python -m pytest tests/ -v
 ```
-aero/
-├── src/aero/
-│   ├── cli/main.py              # aero 命令入口
-│   ├── core/                    # 配置、类型定义
-│   ├── agent/                   # Agent 循环、LLM 客户端、运行时
-│   ├── toolbox/                 # 工具注册表、内置工具
-│   └── adapters/era5_cds.py     # ERA5 CDS 适配器
-├── tests/                       # 测试
-└── issues/                      # 设计文档
+
+运行静态检查：
+
+```bash
+ruff check src tests
 ```
+
+主要代码位于 `src/aero/`：
+
+```text
+src/aero/
+├── agent/       # Agent 循环、LLM/视觉客户端、会话与子 Agent
+├── adapters/    # ERA5、GFS、GEFS、IFS 等数据适配器
+├── cli/         # aero 命令与 Textual 界面
+├── core/        # 配置、日志、模型服务商与通用类型
+├── datasets/    # 数据集目录、数据模型与提供方实现
+├── toolbox/     # Agent 可调用的领域工具
+├── skills/      # 内置科学绘图、地图与运行环境技能
+└── data/        # 参数表、可用性与文献辅助数据
+```
+
+## 许可证
+
+[Apache License 2.0](LICENSE)

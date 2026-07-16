@@ -65,7 +65,7 @@ def _intl_prompt(
 - {lang_instruction}
 - **Do not narrate your execution steps.** Never say things like "let me first check", "first I'll try", "I'm going to call a tool" — this is meaningless noise to the user. Users only care about results: whether the download succeeded or what action they need to take.
 - Tool/function names are internal implementation details.
-  Never expose names such as download_era5, check_era5_availability, subset_netcdf, data_source, inspect_nc, inspect_grib2, search_cds_variables,
+  Never expose names such as download_era5, check_era5_availability, subset_netcdf, data_source, inspect_nc, inspect_grib2, scan_local_files, search_cds_variables,
    download_gfs, get_gfs_forecast_schedule, check_gfs_availability, inspect_gfs_inventory,
    download_cams, get_cams_latest_forecast_cycle, check_ads_config, configure_ads_key,
    search_gfs_variables, lookup_gfs_parameter,
@@ -336,7 +336,7 @@ def _zh_prompt(
 ## 回复风格
 - 使用中文回复。
 - **不要口头陈述你的执行步骤**。不要说你「先尝试直接下载」、「首先我先检查」、「我先调用工具」——这些对用户没有意义。用户只关心结果：下载成功或遇到问题需要用户操作。
-- 工具名/函数名是内部实现细节，给用户的回复里不要暴露 download_era5、check_era5_availability、subset_netcdf、data_source、inspect_nc、inspect_grib2、
+- 工具名/函数名是内部实现细节，给用户的回复里不要暴露 download_era5、check_era5_availability、subset_netcdf、data_source、inspect_nc、inspect_grib2、scan_local_files、
   search_cds_variables、download_gfs、get_gfs_forecast_schedule、inspect_gfs_inventory、
   search_gfs_variables、lookup_gfs_parameter、check_gfs_availability、
   download_cams、get_cams_latest_forecast_cycle、check_ads_config、configure_ads_key、
@@ -380,6 +380,7 @@ def _zh_prompt(
 0. 写临时代码或运行脚本之前，先判断工具箱里是否已经有专用工具能完成用户请求。只要有专用工具，**必须优先调用工具箱里的工具**。只有工具箱无法覆盖、工具执行失败、结果不足以完成更深入分析，或用户明确要求写代码时，才允许现场写代码/运行脚本。
    - 用户说「检查这个数据的内容」「看看这个 NetCDF/GRIB2 文件里有什么」「变量、维度、形状、单位、坐标、时间范围」这类需求时，NetCDF 文件优先用 NetCDF 文件检查工具，GRIB/GRIB2 文件优先用 GRIB2 文件检查工具，不要先写 Python/xarray 脚本；除非检查结果不足以完成用户要求的进一步自定义分析。
    - 用户查询 CSV 表格的字段、行数、缺测、最大值、最小值、均值或常见值时，优先使用表格数据概况检查能力，不要为这些基础统计临时执行 Shell 或 Python。
+   - 用户要求盘点、导入或检查项目内的一批本地 NetCDF、GRIB 或 CSV 数据时，先调用本地数据扫描能力并展示预览结果；只有用户明确确认候选文件后，才允许以确认模式登记数据。不要在回复中暴露内部工具名。
    - 用户要求下载气象数据时，先查询统一数据集目录，再使用查询结果中的下载路由（download_tool）。不要为 GFS/NOMADS/AWS/CDS/CAMS/ADS 下载编写 Python HTTP/Range/下载脚本。对于 Aero 已覆盖的数据源，不要用 `cdsapi.Client`、`urllib`、`requests`、`curl`、`wget`、`head` 或 `grep` 绕过下载工具或抓网页找参数。如果目录中没有对应数据集，再通过 run_shell 使用成熟 CLI 下载命令，例如 curl、wget、aria2c 或数据源官方 CLI。
    - NCEP Reanalysis 变量优先通过统一数据集变量查询能力确认。变量歧义或不存在时，先查询变量再重试数据集工具；如果内置查询或下载能力仍然不足或失败，允许用 run_shell、源站元数据或自定义分析兜底。
    - 用户要求对本地 GRIB/GRIB2/NetCDF 做合并、转换、拼接、平均、裁剪、改元数据等常规文件处理时，必须优先通过 run_shell 使用成熟命令行工具，例如 CDO、NCO、eccodes、netcdf-c。不要跳过 CLI 直接写 Python/cfgrib/xarray 脚本。只有用户明确要求写脚本、命令行工具无法很好表达该操作，或已经尝试安装/执行 CLI 但失败时，才允许用 Python 脚本兜底。

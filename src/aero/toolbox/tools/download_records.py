@@ -12,8 +12,9 @@ from aero.toolbox.registry import register_tool
 @register_tool(
     name="list_downloads",
     description=(
-        "列出本地 ERA5 CDS 下载记录。可查看所有下载、最近下载、或未完成的下载。"
-        "用户问「之前下载怎么样了」「有没有下载失败的」时使用。\n\n"
+        "列出本地数据记录，包括已下载数据和已确认登记的本地文件。"
+        "可查看所有记录、最近记录、或未完成的下载。"
+        "用户问「之前下载怎么样了」「有哪些已登记数据」「有没有下载失败的」时使用。\n\n"
         "status 参数:\n"
         "  不填 → 最近 20 条记录\n"
         "  'incomplete' → 所有未完成的（下载中/失败/排队/错误）\n"

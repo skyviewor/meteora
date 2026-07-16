@@ -14,6 +14,7 @@ MIGRATED_TOOLS = (
     "download_dataset",
     "parse_isd_csv",
     "inspect_csv_table",
+    "scan_local_files",
     "record_instruction",
     "show_instructions",
     "clear_instructions",
@@ -63,6 +64,18 @@ def test_migrated_tools_are_registered():
     registry = get_registry()
     for name in MIGRATED_TOOLS:
         assert registry.get(name) is not None
+
+
+def test_local_data_scan_only_requires_confirmation_when_registering():
+    from aero.agent.loop import _tool_call_needs_confirmation
+    from aero.toolbox.registry import get_registry
+
+    spec = get_registry().get("scan_local_files")
+
+    assert spec is not None
+    assert spec.requires_confirmation is True
+    assert _tool_call_needs_confirmation("scan_local_files", {"confirm": False}) is False
+    assert _tool_call_needs_confirmation("scan_local_files", {"confirm": True}) is True
 
 
 def test_preview_image_tool_description_requires_inline_image_too():

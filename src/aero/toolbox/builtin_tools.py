@@ -175,6 +175,7 @@ __all__ = [
     "download_ifs",
     "download_dataset",
     "search_dataset_stations",
+    "scan_local_files",
     "search_dataset_variables",
     "delete_file",
     "download_literature_pdf",
