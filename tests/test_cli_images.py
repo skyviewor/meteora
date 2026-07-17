@@ -60,6 +60,21 @@ def test_inline_image_paths_and_attachment_indexes(tmp_path, monkeypatch):
     assert app._image_attachments == [image_path.resolve()]
 
 
+def test_checkpoint_output_enters_chat_view_from_startup():
+    async def check_view():
+        app = AeroApp(AeroConfig(), persist_config=False)
+        async with app.run_test(size=(100, 30)) as pilot:
+            assert app.screen.has_class("startup")
+
+            app._show_checkpoint_message("没有检查点")
+            await pilot.pause()
+
+            assert app._chat_started is True
+            assert not app.screen.has_class("startup")
+
+    asyncio.run(check_view())
+
+
 def test_terminal_preview_is_cached_until_image_changes(tmp_path):
     image_path = tmp_path / "map.png"
     Image.new("RGB", (12, 8), (20, 40, 180)).save(image_path)

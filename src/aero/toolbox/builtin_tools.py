@@ -82,6 +82,13 @@ from aero.toolbox.tools.literature import (
 
 
 from aero.toolbox.tools.planning import propose_execution, write_plan_document
+from aero.toolbox.tools.checkpoints import (
+    compare_checkpoint,
+    create_checkpoint,
+    list_checkpoints,
+    rename_checkpoint,
+    start_checkpoint_experiment,
+)
 
 
 from aero.toolbox.tools.documents import preview_image, read_pdf
@@ -166,6 +173,8 @@ __all__ = [
     "configure_earthdata_token",
     "configure_llm_provider",
     "configure_vision_model",
+    "compare_checkpoint",
+    "create_checkpoint",
     "describe_dataset",
     "describe_cds_dataset",
     "download_era5",
@@ -190,6 +199,7 @@ __all__ = [
     "inspect_gfs_inventory",
     "inspect_grib2",
     "list_downloads",
+    "list_checkpoints",
     "launch_sub_agent",
     "list_llm_providers",
     "list_figures",
@@ -199,6 +209,7 @@ __all__ = [
     "lookup_ecmwf_parameter",
     "lookup_gfs_parameter",
     "propose_execution",
+    "rename_checkpoint",
     "preview_image",
     "parse_isd_csv",
     "query_sub_agents",
@@ -217,6 +228,7 @@ __all__ = [
     "send_email",
     "set_max_tool_rounds",
     "show_instructions",
+    "start_checkpoint_experiment",
     "subset_netcdf",
     "retry_download",
     "analyze_image",

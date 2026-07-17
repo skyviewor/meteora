@@ -140,6 +140,18 @@ class SessionManager:
             logger.exception("session.load_failed", session_id=session_id)
             return None
 
+    def snapshot(self, session_id: str) -> bytes | None:
+        """Return the encrypted bytes for a saved session."""
+        path = self.storage_dir / f"{session_id}.json"
+        return path.read_bytes() if path.is_file() else None
+
+    def load_snapshot(self, encrypted: bytes) -> tuple[list[Message], SessionMeta]:
+        """Decode an encrypted session snapshot without changing saved sessions."""
+        payload = self._decrypt(encrypted)
+        messages = [_deserialize_message(d) for d in payload.get("messages", [])]
+        meta = SessionMeta.from_dict(payload.get("meta", {}))
+        return messages, meta
+
     def delete(self, session_id: str) -> bool:
         path = self.storage_dir / f"{session_id}.json"
         if not path.exists():

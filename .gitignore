@@ -25,6 +25,7 @@ pixi.lock
 Thumbs.db
 
 # Aero data
+.aero/
 data/
 aero-project/data/
 test/data/

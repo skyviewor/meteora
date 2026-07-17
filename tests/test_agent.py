@@ -97,6 +97,18 @@ def test_session_list(tmp_path):
     assert {s.id for s in sessions} == {"s1", "s2"}
 
 
+def test_session_encrypted_snapshot_round_trip(tmp_path):
+    manager = SessionManager(tmp_path)
+    messages = [Message(role="user", content="ozone")]
+    manager.save("snapshot", messages)
+
+    encrypted = manager.snapshot("snapshot")
+    restored, meta = manager.load_snapshot(encrypted)
+
+    assert restored == messages
+    assert meta.id == "snapshot"
+
+
 def test_session_delete_removes_from_index(tmp_path):
     sm = SessionManager(tmp_path)
     sm.save("s1", [Message(role="user", content="a")])

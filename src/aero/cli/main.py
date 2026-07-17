@@ -41,6 +41,7 @@ from textual.widgets import (
     Static,
     TextArea,
 )
+from textual.widgets._markdown import MarkdownBullet, MarkdownBulletList, MarkdownListItem
 from textual.widgets._option_list import Option
 from textual.worker import Worker, WorkerCancelled
 
@@ -74,6 +75,7 @@ from aero.agent.subagent import (
     use_subagent_launcher,
     use_subagent_status_provider,
 )
+from aero.agent.checkpoint_context import use_checkpoint_creator
 from aero.core.config import (
     AeroConfig,
     clear_llm_api_key,
@@ -367,12 +369,28 @@ class ConfirmScreen(ModalScreen[str]):
         Binding("space", "confirm_selected", "确认", show=False, priority=True),
     ]
 
-    _BUTTON_IDS = ("#btn-allow", "#btn-always", "#btn-deny")
-
-    def __init__(self, message: str, lang: str = "zh"):
+    def __init__(
+        self,
+        message: str,
+        lang: str = "zh",
+        *,
+        title: str | None = None,
+        allow_label: str | None = None,
+        deny_label: str | None = None,
+        show_always: bool = True,
+    ):
         super().__init__()
         self._message = message
         self._lang = lang
+        self._title = title or t("confirm.permission_required", lang)
+        self._allow_label = allow_label or t("confirm.allow_once", lang)
+        self._deny_label = deny_label or t("confirm.reject", lang)
+        self._show_always = show_always
+        self._button_ids = (
+            ("#btn-allow", "#btn-always", "#btn-deny")
+            if show_always
+            else ("#btn-allow", "#btn-deny")
+        )
         self._selected_button = 0
 
     def on_mount(self) -> None:
@@ -380,13 +398,18 @@ class ConfirmScreen(ModalScreen[str]):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="confirm-dialog"):
-            yield Static(t("confirm.permission_required", self._lang), id="confirm-title")
+            yield Static(self._title, id="confirm-title")
             with VerticalScroll(id="confirm-message-box"):
                 yield Static(self._message, id="confirm-message")
             with Horizontal(id="confirm-buttons"):
-                yield Static(t("confirm.allow_once", self._lang), id="btn-allow", classes="confirm-option")
-                yield Static(t("confirm.allow_always", self._lang), id="btn-always", classes="confirm-option")
-                yield Static(t("confirm.reject", self._lang), id="btn-deny", classes="confirm-option")
+                yield Static(self._allow_label, id="btn-allow", classes="confirm-option")
+                if self._show_always:
+                    yield Static(
+                        t("confirm.allow_always", self._lang),
+                        id="btn-always",
+                        classes="confirm-option",
+                    )
+                yield Static(self._deny_label, id="btn-deny", classes="confirm-option")
                 yield Static(t("confirm.shortcuts", self._lang), id="confirm-shortcuts")
 
     def on_key(self, event: events.Key) -> None:
@@ -405,23 +428,25 @@ class ConfirmScreen(ModalScreen[str]):
             event.prevent_default()
             self._confirm_selected_button()
             return
-        if event.character == "A":
+        if event.character == "A" and self._show_always:
             event.stop()
             self.action_always()
 
     @on(events.Click, "#btn-allow")
     def on_allow_pressed(self) -> None:
-        self._selected_button = 0
+        self._selected_button = self._button_ids.index("#btn-allow")
         self.action_allow()
 
     @on(events.Click, "#btn-always")
     def on_always_pressed(self) -> None:
-        self._selected_button = 1
+        if not self._show_always:
+            return
+        self._selected_button = self._button_ids.index("#btn-always")
         self.action_always()
 
     @on(events.Click, "#btn-deny")
     def on_deny_pressed(self) -> None:
-        self._selected_button = 2
+        self._selected_button = self._button_ids.index("#btn-deny")
         self.action_deny()
 
     def action_focus_previous(self) -> None:
@@ -434,20 +459,21 @@ class ConfirmScreen(ModalScreen[str]):
         self._confirm_selected_button()
 
     def _move_button_focus(self, delta: int) -> None:
-        self._selected_button = (self._selected_button + delta) % len(self._BUTTON_IDS)
+        self._selected_button = (self._selected_button + delta) % len(self._button_ids)
         self._sync_selected_button()
 
     def _sync_selected_button(self) -> None:
-        for index, selector in enumerate(self._BUTTON_IDS):
+        for index, selector in enumerate(self._button_ids):
             button = self.query_one(selector, Static)
             selected = index == self._selected_button
             button.set_class(selected, "confirm-selected")
             button.refresh(repaint=True)
 
     def _confirm_selected_button(self) -> None:
-        if self._selected_button == 0:
+        selected = self._button_ids[self._selected_button]
+        if selected == "#btn-allow":
             self.action_allow()
-        elif self._selected_button == 1:
+        elif selected == "#btn-always":
             self.action_always()
         else:
             self.action_deny()
@@ -456,6 +482,8 @@ class ConfirmScreen(ModalScreen[str]):
         self.dismiss("allow")
 
     def action_always(self) -> None:
+        if not self._show_always:
+            return
         self.dismiss("always")
 
     def action_deny(self) -> None:
@@ -760,6 +788,10 @@ class ChatTextArea(TextArea):
     def action_submit(self) -> None:
         app = self.app
         current_text = self.text.strip()
+        if _command_requires_input(current_text):
+            self.load_text(current_text + " ")
+            self.action_cursor_line_end()
+            return
         commands = app._command_candidates(current_text)
         if current_text.startswith("/"):
             exact_match = any(current_text == command for command, _ in commands)
@@ -866,8 +898,33 @@ class ChatScroll(VerticalScroll):
         getattr(self.app, "_scroll_chat")(up=False)
 
 
+class ChatMarkdownBulletList(MarkdownBulletList):
+    """Bullet list that highlights restore-protection checkpoint rows."""
+
+    def compose(self) -> ComposeResult:
+        for block in self._blocks:
+            if not isinstance(block, MarkdownListItem):
+                continue
+            bullet = MarkdownBullet()
+            bullet.symbol = block.bullet
+            is_safety = any(
+                "恢复保护 ·" in child._content.plain for child in block._blocks
+            )
+            yield Horizontal(
+                bullet,
+                Vertical(*block._blocks),
+                classes="checkpoint-safety" if is_safety else None,
+            )
+        self._blocks.clear()
+
+
 class ChatMarkdown(Markdown):
     """Markdown body that lets chat history own wheel scrolling."""
+
+    BLOCKS = {
+        **Markdown.BLOCKS,
+        "bullet_list_open": ChatMarkdownBulletList,
+    }
 
     def update(self, markdown: str) -> object:
         return super().update(_render_terminal_math(markdown))
@@ -1169,6 +1226,10 @@ class AeroApp(App):
         color: $text-muted;
     }
 
+    Markdown.agent-content .checkpoint-safety {
+        color: $warning;
+    }
+
     .image-attachment {
         width: 100%;
         height: auto;
@@ -1336,6 +1397,7 @@ class AeroApp(App):
         self._secondary_commands_list: list[tuple[str, str]] = []
         self._image_attachments: list[Path] = []
         self._session_mgr = None  # Lazy init
+        self._checkpoint_mgr = None  # Lazy init
         self._session_id: str | None = None
         self._session_saved_on_exit = False
         self._session_title_workers: set[str] = set()
@@ -1929,6 +1991,36 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
+        if text == "/checkpoint delete" or text.startswith("/checkpoint delete "):
+            await self._handle_delete_checkpoint_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/checkpoint rename" or text.startswith("/checkpoint rename "):
+            self._handle_rename_checkpoint_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/checkpoint" or text.startswith("/checkpoint "):
+            self._handle_checkpoint_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/checkpoints" or text.startswith("/checkpoints "):
+            self._handle_checkpoints_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/restore" or text.startswith("/restore "):
+            await self._handle_restore_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/experiment" or text.startswith("/experiment "):
+            self._handle_experiment_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
         if text == "/subagent" or text.startswith("/subagent "):
             self._handle_subagent_command(text)
             self.query_one("#user-input", TextArea).focus()
@@ -2296,6 +2388,10 @@ class AeroApp(App):
             ("/vision", t("cmd.vision", self.config.language)),
             ("/mode", t("cmd.mode", self.config.language)),
             ("/session", t("cmd.session", self.config.language)),
+            ("/checkpoint", t("cmd.checkpoint", self.config.language)),
+            ("/checkpoints", t("cmd.checkpoints", self.config.language)),
+            ("/restore", t("cmd.restore", self.config.language)),
+            ("/experiment", t("cmd.experiment", self.config.language)),
             ("/compact", t("cmd.compact", self.config.language)),
             ("/instructions", t("cmd.instructions", self.config.language)),
             ("/subagent", t("cmd.subagent", self.config.language)),
@@ -2305,6 +2401,12 @@ class AeroApp(App):
             ("/set model ", "切换模型  如 flash 或 pro"),
             ("/set variants ", "设置推理强度  low/medium/high/max/auto"),
             ("/session rename ", "修改当前会话标题"),
+            ("/checkpoint ", "创建带名称的检查点"),
+            ("/checkpoint delete ", "永久删除指定检查点"),
+            ("/checkpoint rename ", "修改指定检查点的名称"),
+            ("/checkpoints all", "包含恢复保护记录的完整列表"),
+            ("/restore ", "预览差异并恢复检查点"),
+            ("/experiment ", "从当前状态开始实验分支"),
             ("/instructions clear", "清空当前项目指令"),
             ("/subagent list", "查看后台任务"),
             ("/subagent cancel ", "取消后台任务"),
@@ -2581,6 +2683,267 @@ class AeroApp(App):
             from aero.agent.session import SessionManager
             self._session_mgr = SessionManager()
         return self._session_mgr
+
+    def _get_checkpoint_mgr(self):
+        if self._checkpoint_mgr is None:
+            from aero.checkpoints import CheckpointManager
+
+            self._checkpoint_mgr = CheckpointManager(Path.cwd())
+        return self._checkpoint_mgr
+
+    def _handle_checkpoint_command(self, text: str) -> None:
+        name = text.split(maxsplit=1)[1].strip() if " " in text.strip() else ""
+        try:
+            checkpoint = self._create_checkpoint(name=name, kind="manual")
+            exact = sum(1 for item in checkpoint["files"] if item["restore"] == "exact")
+            references = len(checkpoint["files"]) - exact
+            capability = (
+                "支持文件恢复" if checkpoint["exact_restore"] else "仅保存数据清单"
+            )
+            message = (
+                "### 检查点已创建\n\n"
+                f"**{checkpoint['name']}**  `{checkpoint['id']}`\n\n"
+                f"- 可恢复文件：{exact} 个\n"
+                f"- 仅记录数据：{references} 个\n"
+                f"- 恢复能力：{capability}"
+            )
+            if checkpoint.get("git_error"):
+                message += f"\n\n> {checkpoint['git_error']}"
+            self._show_checkpoint_message(message)
+        except Exception as exc:
+            self._show_checkpoint_message(f"检查点创建失败：{exc}")
+
+    def _handle_checkpoints_command(self, text: str = "/checkpoints") -> None:
+        argument = text.split(maxsplit=1)[1].strip().lower() if " " in text.strip() else ""
+        if argument not in {"", "all"}:
+            self._show_checkpoint_message("用法：`/checkpoints` 或 `/checkpoints all`。")
+            return
+        all_checkpoints = self._get_checkpoint_mgr().list()
+        safety = [item for item in all_checkpoints if item.get("kind") == "pre-restore"]
+        checkpoints = all_checkpoints if argument == "all" else [
+            item for item in all_checkpoints if item.get("kind") != "pre-restore"
+        ]
+        if not checkpoints:
+            message = "还没有用户创建的检查点。使用 `/checkpoint 名称` 创建一个。"
+            if safety:
+                message += f"\n\n另有 {len(safety)} 条恢复保护记录，可用 `/checkpoints all` 查看。"
+            self._show_checkpoint_message(message)
+            return
+        title = "全部检查点" if argument == "all" else "检查点"
+        lines = [f"### {title}", ""]
+        from aero.checkpoints import checkpoint_progress_label
+
+        for item in checkpoints:
+            created = datetime.fromtimestamp(item["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
+            exact = sum(1 for file in item.get("files", []) if file.get("restore") == "exact")
+            refs = len(item.get("files", [])) - exact
+            marker = "恢复保护 · " if item.get("kind") == "pre-restore" else ""
+            details = [created]
+            progress = checkpoint_progress_label(item)
+            if progress:
+                details.append(progress)
+            details.extend([f"可恢复文件 {exact}", f"仅记录数据 {refs}"])
+            lines.append(
+                f"- `{item['id']}`  **{item['name']}**  "
+                f"{marker}{' · '.join(details)}"
+            )
+        if safety and argument != "all":
+            lines.extend(
+                [
+                    "",
+                    f"已隐藏 {len(safety)} 条恢复保护记录；使用 `/checkpoints all` 查看。",
+                ]
+            )
+        lines.extend(["", "使用 `/restore 检查点ID` 预览差异并恢复。"])
+        self._show_checkpoint_message("\n".join(lines))
+
+    async def _handle_delete_checkpoint_command(self, text: str) -> None:
+        parts = text.split(maxsplit=2)
+        checkpoint_id = parts[2].strip() if len(parts) > 2 else ""
+        if not checkpoint_id:
+            self._show_checkpoint_message(
+                "用法：`/checkpoint delete 检查点ID`。先用 `/checkpoints all` 查看列表。"
+            )
+            return
+        manager = self._get_checkpoint_mgr()
+        try:
+            checkpoint = manager.load(checkpoint_id)
+            if checkpoint is None:
+                raise ValueError(f"找不到检查点：{checkpoint_id}")
+        except Exception as exc:
+            self._show_checkpoint_message(f"无法读取检查点：{exc}")
+            return
+
+        exact = sum(1 for item in checkpoint.get("files", []) if item.get("restore") == "exact")
+        references = len(checkpoint.get("files", [])) - exact
+        kind = "恢复保护记录" if checkpoint.get("kind") == "pre-restore" else "用户检查点"
+        message = "\n".join(
+            [
+                f"永久删除{kind}：{checkpoint['name']}",
+                f"ID：{checkpoint['id']}",
+                f"可恢复文件：{exact}，仅记录数据：{references}",
+                "",
+                "项目文件和 data/ 数据不会被删除，但该检查点将无法再恢复。",
+            ]
+        )
+        self.screen.add_class("confirming")
+        try:
+            choice = await self.push_screen_wait(
+                ConfirmScreen(
+                    message,
+                    self.config.language,
+                    title=t("confirm.checkpoint_delete_title", self.config.language),
+                    allow_label=t("confirm.checkpoint_delete", self.config.language),
+                    deny_label=t("confirm.cancel", self.config.language),
+                    show_always=False,
+                )
+            )
+        finally:
+            self.screen.remove_class("confirming")
+        if _normalize_confirm_choice(choice) not in {"approve", "allow", "always"}:
+            self._show_checkpoint_message("已取消删除，检查点保持不变。")
+            return
+        try:
+            deleted = manager.delete(checkpoint["id"])
+            self._show_checkpoint_message(
+                f"已删除检查点 **{deleted['name']}**（`{deleted['id']}`）。"
+            )
+        except Exception as exc:
+            self._show_checkpoint_message(f"检查点删除失败：{exc}")
+
+    def _handle_rename_checkpoint_command(self, text: str) -> None:
+        parts = text.split(maxsplit=3)
+        checkpoint_id = parts[2].strip() if len(parts) > 2 else ""
+        new_name = parts[3].strip() if len(parts) > 3 else ""
+        if not checkpoint_id or not new_name:
+            self._show_checkpoint_message(
+                "用法：`/checkpoint rename 检查点ID 新名称`。"
+                "先用 `/checkpoints all` 查看列表。"
+            )
+            return
+        try:
+            manager = self._get_checkpoint_mgr()
+            previous = manager.load(checkpoint_id)
+            if previous is None:
+                raise ValueError(f"找不到检查点：{checkpoint_id}")
+            renamed = manager.rename(previous["id"], new_name)
+            self._show_checkpoint_message(
+                "### 检查点已改名\n\n"
+                f"`{renamed['id']}`  **{previous['name']}** → **{renamed['name']}**"
+            )
+        except Exception as exc:
+            self._show_checkpoint_message(f"检查点改名失败：{exc}")
+
+    async def _handle_restore_command(self, text: str) -> None:
+        target = text.split(maxsplit=1)[1].strip() if " " in text.strip() else ""
+        if not target:
+            self._show_checkpoint_message(
+                "用法：`/restore 检查点ID`。先用 `/checkpoints` 查看列表。"
+            )
+            return
+        from aero.checkpoints import CheckpointError
+
+        manager = self._get_checkpoint_mgr()
+        try:
+            checkpoint = manager.load(target)
+            if checkpoint is None:
+                raise CheckpointError(f"找不到检查点：{target}")
+            diff = manager.diff(checkpoint["id"])
+        except Exception as exc:
+            self._show_checkpoint_message(f"无法读取检查点：{exc}")
+            return
+
+        self._show_checkpoint_message(_format_checkpoint_diff(checkpoint, diff))
+        if not checkpoint.get("exact_restore"):
+            return
+        confirmation_message = _restore_confirmation_message(checkpoint, diff)
+        self.screen.add_class("confirming")
+        try:
+            choice = await self.push_screen_wait(
+                ConfirmScreen(
+                    confirmation_message,
+                    self.config.language,
+                    title=t("confirm.checkpoint_restore_title", self.config.language),
+                    allow_label=t("confirm.checkpoint_restore", self.config.language),
+                    deny_label=t("confirm.cancel", self.config.language),
+                    show_always=False,
+                )
+            )
+        finally:
+            self.screen.remove_class("confirming")
+        if _normalize_confirm_choice(choice) not in {"approve", "allow", "always"}:
+            self._show_checkpoint_message("已取消恢复，没有修改文件。")
+            return
+
+        try:
+            self._create_checkpoint(
+                name=f"恢复前安全检查点：{checkpoint['name']}", kind="pre-restore"
+            )
+            restored = manager.restore(checkpoint["id"])
+            self._restore_checkpoint_session(restored)
+            self._show_checkpoint_message(
+                f"已恢复检查点 **{restored['name']}**。大数据仍保持当前位置和内容；"
+                "后续操作将作为独立的恢复后进度继续保存。"
+            )
+        except Exception as exc:
+            self._show_checkpoint_message(f"检查点恢复失败：{exc}")
+
+    def _handle_experiment_command(self, text: str) -> None:
+        name = text.split(maxsplit=1)[1].strip() if " " in text.strip() else ""
+        try:
+            state = self._get_checkpoint_mgr().start_experiment(name)
+            base = state.get("experiment_base") or "当前工作区"
+            self._show_checkpoint_message(
+                f"已开始实验分支 **{state['experiment']}**，起点：`{base}`。"
+            )
+        except Exception as exc:
+            self._show_checkpoint_message(f"无法开始实验分支：{exc}")
+
+    def _create_checkpoint(self, *, name: str, kind: str) -> dict:
+        self._auto_save_session()
+        session_snapshot = None
+        if self._session_id:
+            session_snapshot = self._get_session_mgr().snapshot(self._session_id)
+        model = {
+            "provider": self.config.llm.provider,
+            "model": self.config.llm.model,
+            "vision_model": self.config.vision.model,
+            "mode": self.config.mode,
+        }
+        ledger = _checkpoint_tool_ledger(self.agent.messages if self.agent else [])
+        return self._get_checkpoint_mgr().create(
+            name,
+            session_id=self._session_id,
+            session_snapshot=session_snapshot,
+            model=model,
+            tool_ledger=ledger,
+            kind=kind,
+        )
+
+    def _restore_checkpoint_session(self, checkpoint: dict) -> None:
+        snapshot = self._get_checkpoint_mgr().session_snapshot(checkpoint["id"])
+        if snapshot is None or self.agent is None:
+            return
+        import uuid
+
+        messages, meta = self._get_session_mgr().load_snapshot(snapshot)
+        self.agent.messages = messages
+        self.agent.tracker = TokenTracker.from_dict(meta.tracker)
+        self._session_id = uuid.uuid4().hex[:12]
+        set_session_id(self._session_id)
+        self._pending_session_title = f"{meta.name}（恢复）" if meta.name else "恢复的会话"
+        self._session_saved_on_exit = False
+        chat = self.query_one("#chat-area", VerticalScroll)
+        chat.remove_children()
+        self._mount_chat_title()
+        self._render_loaded_session_messages(messages)
+
+    def _show_checkpoint_message(self, message: str) -> None:
+        self._enter_chat_mode()
+        self._mount_agent_message_sync(message)
+        self._chat_log.append(f"Aero:\n{message}")
+        self._last_reply_text = message
+        self._maybe_scroll_to_end()
 
     def _handle_session_command(self, text: str) -> None:
         parts = text.split(maxsplit=2)
@@ -3478,10 +3841,8 @@ class AeroApp(App):
             return
         cmd, _ = self._filtered_commands[cmd_list.index]
         inp = self.query_one("#user-input", TextArea)
-        if cmd.endswith(" "):
-            inp.load_text(cmd)
-        elif cmd == "/set":
-            inp.load_text("/set max_tool_rounds ")
+        if cmd.endswith(" ") or _command_requires_input(cmd):
+            inp.load_text(cmd if cmd.endswith(" ") else cmd + " ")
         elif cmd == "/model":
             inp.load_text("/model ")
         elif cmd == "/variants":
@@ -3504,8 +3865,8 @@ class AeroApp(App):
         index = max(0, min(cmd_list.index, len(self._filtered_commands) - 1))
         cmd, _ = self._filtered_commands[index]
         inp = self.query_one("#user-input", TextArea)
-        if cmd.endswith(" "):
-            inp.load_text(cmd)
+        if cmd.endswith(" ") or _command_requires_input(cmd):
+            inp.load_text(cmd if cmd.endswith(" ") else cmd + " ")
             inp.action_cursor_line_end()
             inp.focus()
             self._hide_command_list()
@@ -3597,6 +3958,9 @@ class AeroApp(App):
                 use_subagent_launcher(self._launch_sub_agent_from_tool),
                 use_subagent_status_provider(self._query_sub_agents_from_tool),
                 use_subagent_canceller(self._cancel_sub_agent_from_tool),
+                use_checkpoint_creator(
+                    lambda name: self._create_checkpoint(name=name, kind="agent")
+                ),
             ):
                 async for event in state.agent.run_stream(text):
                     debug_log(
@@ -4574,7 +4938,10 @@ def _command_suggestions(
     secondary: list[tuple[str, str]],
 ) -> list[tuple[str, str]]:
     sources = list(primary)
-    if " " in prefix:
+    # Show child commands as soon as their parent is being typed. Keep the
+    # initial "/" menu compact, but do not force users to type a space before
+    # discovering options such as `/checkpoints all` or `/session rename`.
+    if prefix != "/":
         sources.extend(secondary)
     matched = [(cmd, desc) for cmd, desc in sources if cmd.startswith(prefix)]
     if not matched:
@@ -4588,6 +4955,11 @@ def _command_suggestions(
     else:
         matched.sort(key=lambda item: (len(item[0]), item[0]))
     return matched
+
+
+def _command_requires_input(command: str) -> bool:
+    """Return whether Enter should complete this command instead of executing it."""
+    return command.rstrip() in {"/set", "/restore", "/experiment"}
 
 
 def _estimate_context_tokens(messages: list[Message]) -> int:
@@ -4908,6 +5280,12 @@ def _help_text(lang: str) -> str:
         t("help.slash_mode", lang),
         t("help.slash_session", lang),
         t("help.slash_session_rename", lang),
+        t("help.slash_checkpoint", lang),
+        t("help.slash_checkpoint_delete", lang),
+        t("help.slash_checkpoint_rename", lang),
+        t("help.slash_checkpoints", lang),
+        t("help.slash_restore", lang),
+        t("help.slash_experiment", lang),
         t("help.slash_compact", lang),
         t("help.slash_set", lang),
         t("help.slash_revoke", lang),
@@ -4916,6 +5294,128 @@ def _help_text(lang: str) -> str:
         t("help.footer", lang),
     ]
     return "\n".join(help_lines)
+
+
+def _checkpoint_tool_ledger(messages: list[Message]) -> list[dict[str, Any]]:
+    """Build a redacted ledger of tool calls and their recorded outcomes."""
+    outcomes = {
+        message.tool_call_id: message.content
+        for message in messages
+        if message.role == "tool" and message.tool_call_id
+    }
+    ledger = []
+    for message in messages:
+        for call in message.tool_calls or []:
+            outcome = outcomes.get(call.id, "")
+            ledger.append(
+                {
+                    "tool": call.name,
+                    "arguments": _redact_checkpoint_value(call.arguments),
+                    "status": (
+                        "success" if outcome and "error" not in outcome.lower() else "unknown"
+                    ),
+                    "outputs": _checkpoint_output_paths(outcome),
+                }
+            )
+    return ledger
+
+
+def _redact_checkpoint_value(value: Any, key: str = "") -> Any:
+    sensitive = {"api_key", "apikey", "key", "password", "secret", "token"}
+    lowered = key.lower()
+    if lowered in sensitive or any(part in lowered for part in ("password", "secret", "token")):
+        return "***"
+    if isinstance(value, dict):
+        return {str(k): _redact_checkpoint_value(v, str(k)) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_checkpoint_value(item) for item in value]
+    return value
+
+
+def _checkpoint_output_paths(content: str) -> list[str]:
+    """Extract only project file paths from a tool result; never persist raw output."""
+    if not content:
+        return []
+    candidates: list[str] = []
+    try:
+        value = json.loads(content)
+    except (TypeError, ValueError):
+        value = None
+
+    def visit(item: Any, key: str = "") -> None:
+        if isinstance(item, dict):
+            for child_key, child in item.items():
+                visit(child, str(child_key))
+        elif isinstance(item, list):
+            for child in item:
+                visit(child, key)
+        elif isinstance(item, str) and any(
+            part in key.lower() for part in ("file", "path", "output")
+        ):
+            path = Path(item)
+            if not path.is_absolute() and ".." not in path.parts:
+                candidates.append(path.as_posix())
+
+    visit(value)
+    return sorted(set(candidates))[:100]
+
+
+def _format_checkpoint_diff(checkpoint: dict, diff) -> str:
+    lines = [f"### 恢复预览：{checkpoint['name']}", ""]
+    groups = (
+        ("将覆盖", diff.modified),
+        ("将恢复", diff.missing),
+        ("将移除", diff.added),
+        ("仅记录的数据已变化（不会覆盖）", diff.references_changed),
+    )
+    for label, paths in groups:
+        lines.append(f"**{label}：{len(paths)}**")
+        lines.extend(f"- `{path}`" for path in paths[:20])
+        if len(paths) > 20:
+            lines.append(f"- 以及另外 {len(paths) - 20} 个文件")
+        lines.append("")
+    if not diff.has_changes:
+        lines.append("当前工作区与该检查点一致。")
+    elif checkpoint.get("exact_restore"):
+        lines.append("确认后才会修改文件；大数据文件只报告状态。")
+    else:
+        lines.append("该检查点只保存了数据清单，不能恢复文件。")
+    return "\n".join(lines)
+
+
+def _restore_confirmation_message(checkpoint: dict, diff) -> str:
+    lines = [f"恢复到「{checkpoint['name']}」后：", ""]
+    changes = (
+        ("覆盖当前修改", diff.modified),
+        ("找回已删除文件", diff.missing),
+        ("删除此后新增文件", diff.added),
+    )
+    changed = False
+    for label, paths in changes:
+        if not paths:
+            continue
+        changed = True
+        lines.append(f"{label}（{len(paths)} 个）：")
+        lines.extend(f"  • {path}" for path in paths[:8])
+        if len(paths) > 8:
+            lines.append(f"  • 以及另外 {len(paths) - 8} 个文件")
+        lines.append("")
+    if not changed:
+        lines.extend(["项目文件无需变更，将恢复当时的对话和工作状态。", ""])
+    if diff.references_changed:
+        lines.extend(
+            [
+                f"有 {len(diff.references_changed)} 个数据文件与当时不同，内容将保持不变。",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "data/ 和大型科研数据不会被覆盖或删除。",
+            "恢复前会保存当前状态为恢复保护记录，之后仍可撤回。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _is_replaceable_status(text: str) -> bool:

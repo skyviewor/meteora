@@ -1,12 +1,16 @@
 from aero.cli.main import (
     AeroApp,
+    ChatMarkdown,
+    ConfirmScreen,
     _command_suggestions,
+    _command_requires_input,
     _compacted_context_messages,
     _estimate_context_tokens,
     _load_saved_theme,
     _render_status_lines,
     _render_terminal_math,
     _resolve_theme_name,
+    _restore_confirmation_message,
     _save_user_theme,
     _help_text,
     _assistant_claims_background_handoff,
@@ -193,10 +197,17 @@ def test_session_option_label_uses_iso_time_without_usage():
 
 
 def test_command_suggestions_include_set_subcommands_after_space():
-    primary = [("/set", "设置参数"), ("/session", "历史会话")]
+    primary = [
+        ("/set", "设置参数"),
+        ("/session", "历史会话"),
+        ("/checkpoint", "创建检查点"),
+        ("/checkpoints", "检查点"),
+    ]
     secondary = [
         ("/set max_tool_rounds ", "设置最大工具调用轮次"),
         ("/session rename ", "修改当前会话标题"),
+        ("/checkpoint rename ", "修改检查点名称"),
+        ("/checkpoints all", "显示全部检查点"),
     ]
 
     assert _command_suggestions("/", primary, secondary) == primary
@@ -206,6 +217,26 @@ def test_command_suggestions_include_set_subcommands_after_space():
     assert _command_suggestions("/set max", primary, secondary) == [
         ("/set max_tool_rounds ", "设置最大工具调用轮次")
     ]
+    assert _command_suggestions("/checkpoints", primary, secondary) == [
+        ("/checkpoints", "检查点"),
+        ("/checkpoints all", "显示全部检查点"),
+    ]
+    assert _command_suggestions("/session", primary, secondary) == [
+        ("/session", "历史会话"),
+        ("/session rename ", "修改当前会话标题"),
+    ]
+    assert _command_suggestions("/checkpoint ren", primary, secondary) == [
+        ("/checkpoint rename ", "修改检查点名称")
+    ]
+
+
+def test_commands_with_required_followup_are_completed_before_execution():
+    assert _command_requires_input("/set") is True
+    assert _command_requires_input("/restore") is True
+    assert _command_requires_input("/experiment") is True
+    assert _command_requires_input("/checkpoints") is False
+    assert _command_requires_input("/checkpoints all") is False
+    assert _command_requires_input("/checkpoint") is False
 
 
 def test_normalize_confirm_choice_preserves_allow_and_always():
@@ -215,6 +246,46 @@ def test_normalize_confirm_choice_preserves_allow_and_always():
     assert _normalize_confirm_choice("deny") == "deny"
     assert _normalize_confirm_choice("defer") == "deny"
     assert _normalize_confirm_choice("unexpected") == "deny"
+
+
+def test_operation_confirmation_hides_session_wide_permission():
+    screen = ConfirmScreen(
+        "restore details",
+        "zh",
+        title="恢复检查点",
+        allow_label="确认恢复",
+        deny_label="取消",
+        show_always=False,
+    )
+
+    assert screen._title == "恢复检查点"
+    assert screen._allow_label == "确认恢复"
+    assert screen._deny_label == "取消"
+    assert screen._button_ids == ("#btn-allow", "#btn-deny")
+
+
+def test_restore_confirmation_uses_user_facing_file_actions():
+    diff = type(
+        "Diff",
+        (),
+        {
+            "modified": ("scripts/plot.py",),
+            "missing": (),
+            "added": ("aero.yaml",),
+            "references_changed": ("data/sample.nc",),
+        },
+    )()
+
+    text = _restore_confirmation_message({"name": "基线"}, diff)
+
+    assert "恢复到「基线」后" in text
+    assert "覆盖当前修改（1 个）" in text
+    assert "scripts/plot.py" in text
+    assert "删除此后新增文件（1 个）" in text
+    assert "aero.yaml" in text
+    assert "数据文件与当时不同，内容将保持不变" in text
+    assert "受控文件" not in text
+    assert "恢复保护记录" in text
 
 
 def test_should_queue_input_only_while_model_is_replying():
@@ -361,9 +432,58 @@ def test_help_text_includes_current_commands():
     assert "/new [标题]" in text
     assert "/session" in text
     assert "/session rename" in text
+    assert "/checkpoint" in text
+    assert "/checkpoint rename" in text
+    assert "/checkpoints" in text
+    assert "/restore" in text
+    assert "/experiment" in text
+    assert "all" in text
     assert "Backspace/Delete 删除" in text
     assert "/compact" in text
     assert "缓存命中" in text
+
+
+def test_restore_protection_checkpoint_list_item_has_distinct_style():
+    markdown = ChatMarkdown()
+    [checkpoint_list] = markdown._build_from_source(
+        "- `manual` 普通检查点\n"
+        "- `safety` 恢复前安全检查点 恢复保护 · 2026-07-16 22:20:03"
+    )
+    regular, safety = list(checkpoint_list.compose())
+
+    assert not regular.has_class("checkpoint-safety")
+    assert safety.has_class("checkpoint-safety")
+
+
+def test_checkpoint_tool_ledger_redacts_credentials_and_raw_output():
+    from aero.cli.main import _checkpoint_tool_ledger
+    from aero.core.types import ToolCall
+
+    messages = [
+        Message(
+            role="assistant",
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id="call-1",
+                    name="download_data",
+                    arguments={"api_key": "secret", "output_dir": "data"},
+                )
+            ],
+        ),
+        Message(
+            role="tool",
+            content='{"status":"success","file_path":"data/result.nc","token":"leak"}',
+            tool_call_id="call-1",
+        ),
+    ]
+
+    ledger = _checkpoint_tool_ledger(messages)
+
+    assert ledger[0]["arguments"]["api_key"] == "***"
+    assert ledger[0]["outputs"] == ["data/result.nc"]
+    assert "secret" not in str(ledger)
+    assert "leak" not in str(ledger)
 
 
 def test_session_title_skips_greeting_and_summarizes_request():
