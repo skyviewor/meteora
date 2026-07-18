@@ -3,11 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from aero.checkpoints import (
-    CheckpointError,
-    CheckpointManager,
-    checkpoint_progress_label,
-)
+from aero.checkpoints import CheckpointError, CheckpointManager
 
 
 def test_checkpoint_restores_controlled_files_without_touching_user_git(tmp_path):
@@ -179,11 +175,84 @@ def test_rename_checkpoint_rejects_empty_name(tmp_path):
         manager.rename(checkpoint["id"], "   ")
 
 
-def test_checkpoint_progress_labels_hide_internal_state_names():
-    assert checkpoint_progress_label({"experiment": "main"}) == ""
-    assert checkpoint_progress_label({"experiment": "restore-20260716"}) == "恢复后的进度"
-    assert checkpoint_progress_label({"experiment": "臭氧敏感性"}) == "实验：臭氧敏感性"
-    assert (
-        checkpoint_progress_label({"experiment": "恢复自「第二版」"})
-        == "恢复自「第二版」"
+def test_clear_checkpoints_removes_history_without_touching_project_files(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    script = project / "analysis.py"
+    script.write_text("print('analysis')\n")
+    data = project / "data" / "input.nc"
+    data.parent.mkdir()
+    data.write_bytes(b"CDF-data")
+    manager = CheckpointManager(project)
+    first = manager.create("first", session_snapshot=b"encrypted")
+    safety = manager.create("safety", kind="pre-restore")
+
+    removed = manager.clear()
+
+    assert {item["id"] for item in removed} == {first["id"], safety["id"]}
+    assert manager.list() == []
+    assert not manager.checkpoints_dir.exists()
+    assert not manager.history_dir.exists()
+    assert manager._read_state()["current_checkpoint"] is None
+    assert manager._read_state()["experiment_base"] is None
+    assert script.read_text() == "print('analysis')\n"
+    assert data.read_bytes() == b"CDF-data"
+
+
+def test_experiment_checkpoint_is_scoped_to_experiment_workspace(tmp_path):
+    project = tmp_path / "project"
+    workspace = project / "experiments" / "trial"
+    script = workspace / "scripts" / "analyze.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("print('first')\n")
+    (project / "main.py").write_text("print('main')\n")
+
+    manager = CheckpointManager(workspace, experiment_id="exp-1")
+    checkpoint = manager.create("step one")
+
+    assert checkpoint["scope"] == "experiment"
+    assert checkpoint["experiment_id"] == "exp-1"
+    assert {item["path"] for item in checkpoint["files"]} == {
+        "scripts/analyze.py"
+    }
+    assert manager.checkpoints_dir == workspace / ".aero" / "checkpoints"
+
+
+def test_main_checkpoint_excludes_experiment_workspaces(tmp_path):
+    project = tmp_path / "project"
+    experiment_script = project / "experiments" / "trial" / "scripts" / "test.py"
+    experiment_script.parent.mkdir(parents=True)
+    experiment_script.write_text("print('experiment')\n")
+    (project / "main.py").write_text("print('main')\n")
+
+    checkpoint = CheckpointManager(project).create(
+        "experiment finished",
+        kind="experiment-finish",
+        related_experiment={"id": "exp-1", "name": "trial", "report": "report.md"},
     )
+
+    assert {item["path"] for item in checkpoint["files"]} == {"main.py"}
+    assert checkpoint["scope"] == "main"
+    assert checkpoint["related_experiment"]["id"] == "exp-1"
+
+
+def test_legacy_main_checkpoint_ignores_experiment_paths(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "main.py").write_text("print('main')\n")
+    manager = CheckpointManager(project)
+    checkpoint = manager.create("legacy")
+    metadata_path = manager.checkpoints_dir / checkpoint["id"] / "metadata.json"
+    metadata = manager.load(checkpoint["id"])
+    metadata["files"].append(
+        {
+            "path": "experiments/old/scripts/run.py",
+            "restore": "exact",
+            "fingerprint": "old",
+        }
+    )
+    manager._write_json(metadata_path, metadata)
+
+    diff = manager.diff(checkpoint["id"])
+
+    assert "experiments/old/scripts/run.py" not in diff.missing

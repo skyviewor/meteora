@@ -11,7 +11,6 @@ from urllib.parse import urlparse
 
 from aero.agent.runtime import _conda_roots
 from aero.core.network_region import detect_network_region
-from aero.toolbox.paths import find_project_dir
 from aero.toolbox.registry import register_tool
 from aero.toolbox.runtime_manager import get_runtime_tool_manager
 
@@ -617,7 +616,9 @@ def _resolve_python_executable(token: str, env: dict[str, str]) -> Path | None:
 
 def _normalize_shell_context(command: str, workdir: str) -> tuple[str, str, str]:
     """Run relative commands from the workspace and discard a missing leading cd."""
-    project_dir = find_project_dir().resolve()
+    from aero.toolbox.paths import find_workspace_dir
+
+    project_dir = find_workspace_dir().resolve()
     requested_workdir = Path(workdir).expanduser()
     if not requested_workdir.is_absolute():
         requested_workdir = project_dir / requested_workdir

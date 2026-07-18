@@ -1,6 +1,6 @@
 """Plan document and execution-transition tools."""
 
-from aero.toolbox.paths import find_project_dir, short_path
+from aero.toolbox.paths import find_workspace_dir, short_path
 from aero.toolbox.registry import register_tool
 
 
@@ -30,7 +30,7 @@ async def write_plan_document(content: str, title: str = "") -> dict:
     """Write a planning document to plans/ directory."""
     from aero.data.plans import is_plan_locked, write_plan
 
-    project_dir = find_project_dir()
+    project_dir = find_workspace_dir()
     try:
         result = write_plan(content, title=title, project_dir=project_dir)
         locked = is_plan_locked(project_dir)

@@ -60,6 +60,8 @@ class SessionMeta:
     vision_model: str = ""
     mode: str = ""
     title_source: str = ""
+    project_dir: str = ""
+    transcript: list[dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +76,8 @@ class SessionMeta:
             "vision_model": self.vision_model,
             "mode": self.mode,
             "title_source": self.title_source,
+            "project_dir": self.project_dir,
+            "transcript": self.transcript,
         }
 
     @classmethod
@@ -90,6 +94,8 @@ class SessionMeta:
             vision_model=d.get("vision_model", ""),
             mode=d.get("mode", ""),
             title_source=d.get("title_source", ""),
+            project_dir=d.get("project_dir", ""),
+            transcript=d.get("transcript", []),
         )
 
 
@@ -170,6 +176,22 @@ class SessionManager:
                 pass
         metas.sort(key=lambda m: m.updated_at, reverse=True)
         return metas
+
+    def latest_session(
+        self,
+        project_dir: str | Path,
+        *,
+        include_legacy: bool = True,
+    ) -> SessionMeta | None:
+        """Return the latest session saved for one launch directory."""
+        project = str(Path(project_dir).resolve())
+        sessions = self.list_sessions()
+        for meta in sessions:
+            if meta.project_dir and str(Path(meta.project_dir).resolve()) == project:
+                return meta
+        if include_legacy:
+            return next((meta for meta in sessions if not meta.project_dir), None)
+        return None
 
     def _index_path(self) -> Path:
         return self.storage_dir / _INDEX_FILE

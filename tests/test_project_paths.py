@@ -17,6 +17,18 @@ def test_find_project_dir_uses_current_directory(monkeypatch, tmp_path):
     assert find_project_dir() == nested
 
 
+def test_workspace_binding_routes_writes_without_changing_project_root(tmp_path):
+    from aero.toolbox.paths import find_project_dir, resolve_project_path, use_workspace
+
+    project = tmp_path / "aero"
+    experiment = project / "experiments" / "trial"
+    experiment.mkdir(parents=True)
+
+    with use_workspace(project, experiment):
+        assert find_project_dir() == project
+        assert resolve_project_path("scripts/test.py") == experiment / "scripts/test.py"
+
+
 @pytest.mark.asyncio
 async def test_write_file_resolves_relative_path_from_current_directory(monkeypatch, tmp_path):
     from aero.toolbox.file_access import READ_FILES

@@ -23,14 +23,30 @@ def build_system_prompt(
     language: str | None = None,
     skill_context: str = "",
     instructions_context: str = "",
+    experiment_context: str = "",
 ) -> str:
     lang = language or getattr(config, "language", "zh")
     tools_prompt = _build_tools_section(config.mode)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if lang == "zh":
-        return _zh_prompt(config, tools_prompt, now, skill_context, instructions_context)
-    return _intl_prompt(config, tools_prompt, now, lang, skill_context, instructions_context)
+        return _zh_prompt(
+            config,
+            tools_prompt,
+            now,
+            skill_context,
+            instructions_context,
+            experiment_context,
+        )
+    return _intl_prompt(
+        config,
+        tools_prompt,
+        now,
+        lang,
+        skill_context,
+        instructions_context,
+        experiment_context,
+    )
 
 
 def _intl_prompt(
@@ -40,6 +56,7 @@ def _intl_prompt(
     lang: str,
     skill_context: str = "",
     instructions_context: str = "",
+    experiment_context: str = "",
 ) -> str:
     lang_instruction = _LANG_INSTRUCTIONS.get(lang, _LANG_INSTRUCTIONS["en"])
     return f"""You are Aero, a meteorological research assistant. Help users download, process, and analyze meteorological data.
@@ -51,6 +68,8 @@ def _intl_prompt(
 - The directory opened by the user is the working root.
 - Data directory: {config.output.data_dir}
 - Never invent, search for, or construct another working directory.
+
+{_experiment_section(experiment_context, lang)}
 
 {_mode_instruction(config.mode)}
 
@@ -313,6 +332,7 @@ def _zh_prompt(
     now: str,
     skill_context: str = "",
     instructions_context: str = "",
+    experiment_context: str = "",
 ) -> str:
     return f"""你是 Aero 气象科研助手，帮助用户下载、处理和分析气象数据。
 
@@ -323,6 +343,8 @@ def _zh_prompt(
 - 用户打开的目录就是当前工作根目录。
 - 数据目录：{config.output.data_dir}
 - 禁止猜测、搜索或拼接另一个工作目录。
+
+{_experiment_section(experiment_context, "zh")}
 
 {_mode_instruction_zh(config.mode)}
 
@@ -763,3 +785,10 @@ def _instruction_section(instructions_context: str, lang: str) -> str:
 The following personalized instructions and preferences were set by the user through conversation. They **must be followed**. These are maintained automatically — the user does not need to edit any files.
 
 {instructions_context}"""
+
+
+def _experiment_section(experiment_context: str, lang: str) -> str:
+    if not experiment_context.strip():
+        return ""
+    heading = "## 当前实验上下文" if lang == "zh" else "## Active Experiment Context"
+    return f"{heading}\n{experiment_context}"

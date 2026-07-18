@@ -1,11 +1,19 @@
+from types import SimpleNamespace
+from pathlib import Path
+
+import pytest
+
 from aero.cli.main import (
     AeroApp,
     ChatMarkdown,
     ConfirmScreen,
+    _checkpoint_title_from_messages,
+    _checkpoint_title_prompt,
     _command_suggestions,
     _command_requires_input,
     _compacted_context_messages,
     _estimate_context_tokens,
+    _format_checkpoint_list_entry,
     _load_saved_theme,
     _render_status_lines,
     _render_terminal_math,
@@ -15,6 +23,7 @@ from aero.cli.main import (
     _help_text,
     _assistant_claims_background_handoff,
     _is_subagent_tool_status,
+    _normalize_checkpoint_title,
     _normalize_generated_session_title,
     _normalize_confirm_choice,
     _status_progress_slot,
@@ -201,6 +210,7 @@ def test_command_suggestions_include_set_subcommands_after_space():
         ("/set", "设置参数"),
         ("/session", "历史会话"),
         ("/checkpoint", "创建检查点"),
+        ("/experiment", "开始新的实验分支"),
         ("/checkpoints", "检查点"),
     ]
     secondary = [
@@ -208,6 +218,8 @@ def test_command_suggestions_include_set_subcommands_after_space():
         ("/session rename ", "修改当前会话标题"),
         ("/checkpoint rename ", "修改检查点名称"),
         ("/checkpoints all", "显示全部检查点"),
+        ("/checkpoints clear", "清理全部检查点"),
+        ("/experiment ", "从当前状态开始实验分支"),
     ]
 
     assert _command_suggestions("/", primary, secondary) == primary
@@ -220,6 +232,7 @@ def test_command_suggestions_include_set_subcommands_after_space():
     assert _command_suggestions("/checkpoints", primary, secondary) == [
         ("/checkpoints", "检查点"),
         ("/checkpoints all", "显示全部检查点"),
+        ("/checkpoints clear", "清理全部检查点"),
     ]
     assert _command_suggestions("/session", primary, secondary) == [
         ("/session", "历史会话"),
@@ -227,6 +240,9 @@ def test_command_suggestions_include_set_subcommands_after_space():
     ]
     assert _command_suggestions("/checkpoint ren", primary, secondary) == [
         ("/checkpoint rename ", "修改检查点名称")
+    ]
+    assert _command_suggestions("/exp", primary, secondary) == [
+        ("/experiment", "开始新的实验分支")
     ]
 
 
@@ -424,6 +440,70 @@ def test_exit_session_save_is_idempotent():
     assert calls == ["saved"]
 
 
+@pytest.mark.parametrize("continue_flag", ["--continue", "-c"])
+def test_chat_continue_flag_resumes_last_tui_session(
+    monkeypatch, tmp_path, continue_flag
+):
+    import importlib
+    import sys
+
+    cli_main = importlib.import_module("aero.cli.main")
+    captured = {}
+
+    class FakeApp:
+        def __init__(self, config, **kwargs):
+            captured.update(kwargs)
+
+        def run(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(sys, "argv", ["aero", "chat", continue_flag])
+    monkeypatch.setattr(
+        cli_main, "configure_debug_logging", lambda: Path(tmp_path) / "debug.log"
+    )
+    monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(cli_main, "_load_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(cli_main, "_config_needs_llm_setup", lambda _config: False)
+    monkeypatch.setattr(cli_main, "AeroApp", FakeApp)
+
+    cli_main.main()
+
+    assert captured["resume_last_session"] is True
+    assert captured["mouse"] is True
+
+
+@pytest.mark.parametrize("removed_flag", ["--simple", "--no-tui"])
+def test_removed_non_tui_flags_fail_explicitly(
+    monkeypatch, tmp_path, capsys, removed_flag
+):
+    import importlib
+    import sys
+
+    cli_main = importlib.import_module("aero.cli.main")
+    monkeypatch.setattr(sys, "argv", ["aero", "chat", removed_flag])
+    monkeypatch.setattr(
+        cli_main, "configure_debug_logging", lambda: Path(tmp_path) / "debug.log"
+    )
+    monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli_main.main()
+
+    assert exc_info.value.code == 2
+    assert "已移除" in capsys.readouterr().out
+
+
+def test_cli_usage_only_advertises_tui_chat(capsys):
+    from aero.cli.main import _print_usage
+
+    _print_usage()
+    output = capsys.readouterr().out
+
+    assert "aero chat --continue" in output
+    assert "--simple" not in output
+    assert "--no-tui" not in output
+
+
 def test_help_text_includes_current_commands():
     text = _help_text("zh")
 
@@ -435,8 +515,13 @@ def test_help_text_includes_current_commands():
     assert "/checkpoint" in text
     assert "/checkpoint rename" in text
     assert "/checkpoints" in text
+    assert "/checkpoints clear" in text
     assert "/restore" in text
     assert "/experiment" in text
+    assert "/experiment finish" in text
+    assert "/experiment delete" in text
+    assert "/experiments" in text
+    assert "/experiments clear" in text
     assert "all" in text
     assert "Backspace/Delete 删除" in text
     assert "/compact" in text
@@ -447,12 +532,29 @@ def test_restore_protection_checkpoint_list_item_has_distinct_style():
     markdown = ChatMarkdown()
     [checkpoint_list] = markdown._build_from_source(
         "- `manual` 普通检查点\n"
-        "- `safety` 恢复前安全检查点 恢复保护 · 2026-07-16 22:20:03"
+        "- **恢复前安全检查点：基线** · 2026-07-16 22:20"
     )
     regular, safety = list(checkpoint_list.compose())
 
     assert not regular.has_class("checkpoint-safety")
     assert safety.has_class("checkpoint-safety")
+
+
+def test_checkpoint_list_entry_only_shows_name_time_and_id():
+    text = _format_checkpoint_list_entry(
+        {
+            "id": "20260716-212758-81c7a82b",
+            "name": "第二版",
+            "created_at": 1784218078,
+            "experiment": "restore-20260716",
+            "files": [{"path": "data/input.nc", "restore": "reference"}],
+        }
+    )
+
+    assert text.startswith("- `20260716-212758-81c7a82b` · **第二版** · ")
+    assert "restore-" not in text
+    assert "可恢复文件" not in text
+    assert "仅记录数据" not in text
 
 
 def test_checkpoint_tool_ledger_redacts_credentials_and_raw_output():
@@ -522,6 +624,74 @@ def test_session_title_prompt_uses_first_exchange():
     assert "好的，我来处理。" in prompt
     assert "第二个需求" not in prompt
     assert "不要解释" in prompt
+
+
+def test_checkpoint_title_uses_latest_meaningful_request():
+    messages = [
+        Message(role="user", content="下载 ERA5 数据"),
+        Message(role="assistant", content="已经下载完成。"),
+        Message(role="user", content="继续完成臭氧敏感性分析并保存结果"),
+        Message(role="assistant", content="分析结果已经保存。"),
+    ]
+
+    assert _checkpoint_title_from_messages(messages) == "继续完成臭氧敏感性分析并保存结果"
+
+
+def test_checkpoint_title_prompt_uses_recent_work_and_forbids_generic_name():
+    messages = [
+        Message(role="user", content="下载 CAMS 臭氧数据"),
+        Message(role="assistant", content="下载完成。"),
+        Message(role="user", content="绘制全球臭氧分布图"),
+        Message(role="assistant", content="图片已经生成。"),
+    ]
+
+    prompt = _checkpoint_title_prompt(messages, "zh")
+
+    assert "绘制全球臭氧分布图" in prompt
+    assert "图片已经生成" in prompt
+    assert "不要使用‘检查点’三个字" in prompt
+    assert "6到16个中文字符" in prompt
+
+
+def test_checkpoint_title_removes_generic_checkpoint_wording():
+    assert _normalize_checkpoint_title("标题：全球臭氧制图检查点。") == "全球臭氧制图"
+    assert _normalize_checkpoint_title("Checkpoint") == ""
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_title_is_generated_by_model(monkeypatch):
+    prompts = []
+
+    class FakeClient:
+        def __init__(self, config):
+            self.config = config
+
+        async def chat(self, messages):
+            prompts.append(messages[0].content)
+            return "标题：CAMS 臭氧制图完成。"
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr("aero.agent.llm_client.LLMClient", FakeClient)
+    app = AeroApp.__new__(AeroApp)
+    app.agent = SimpleNamespace(
+        messages=[Message(role="user", content="绘制 CAMS 全球臭氧图")]
+    )
+    app.config = SimpleNamespace(
+        language="zh",
+        llm=SimpleNamespace(
+            provider="test",
+            model="test-model",
+            base_url="https://example.invalid",
+            active_api_key=lambda: "test-key",
+        ),
+    )
+
+    title = await AeroApp._generate_checkpoint_title(app)
+
+    assert title == "CAMS 臭氧制图完成"
+    assert prompts and "绘制 CAMS 全球臭氧图" in prompts[0]
 
 
 def test_user_theme_preference_persists(tmp_path, monkeypatch):

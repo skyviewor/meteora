@@ -5,9 +5,22 @@ from __future__ import annotations
 from datetime import datetime
 
 from aero.agent.checkpoint_context import create_checkpoint_from_context
-from aero.checkpoints import CheckpointError, CheckpointManager, checkpoint_progress_label
+from aero.checkpoints import CheckpointError, CheckpointManager
+from aero.experiments import ExperimentError, ExperimentManager
 from aero.toolbox.paths import find_project_dir
 from aero.toolbox.registry import register_tool
+
+
+def _active_checkpoint_manager() -> CheckpointManager:
+    project_dir = find_project_dir()
+    experiment_manager = ExperimentManager(project_dir)
+    experiment = experiment_manager.active()
+    if experiment is None:
+        return CheckpointManager(project_dir)
+    return CheckpointManager(
+        experiment_manager.workspace_path(experiment),
+        experiment_id=experiment["id"],
+    )
 
 
 @register_tool(
@@ -48,8 +61,10 @@ async def create_checkpoint(name: str = "") -> dict:
     name="list_checkpoints",
     description=(
         "用户询问已保存的检查点、恢复点或实验历史时使用。"
+        "只查询当前作用域：实验中仅返回该实验的检查点，主流程中仅返回主流程检查点。"
         "默认不返回系统自动创建的恢复保护记录；仅当用户明确要求查看全部或恢复保护记录时才包含。"
-        "回复中使用自然语言和检查点 ID，不要暴露工具名。"
+        "回复列表时默认只显示检查点名称、保存时间和 ID；用户明确询问时再补充其他信息。"
+        "不要暴露工具名。"
     ),
     parameters={
         "type": "object",
@@ -62,7 +77,7 @@ async def create_checkpoint(name: str = "") -> dict:
     },
 )
 async def list_checkpoints(include_safety: bool = False) -> dict:
-    all_checkpoints = CheckpointManager(find_project_dir()).list()
+    all_checkpoints = _active_checkpoint_manager().list()
     safety_count = sum(1 for item in all_checkpoints if item.get("kind") == "pre-restore")
     checkpoints = (
         all_checkpoints
@@ -77,8 +92,6 @@ async def list_checkpoints(include_safety: bool = False) -> dict:
                 "id": item["id"],
                 "name": item["name"],
                 "created_at": datetime.fromtimestamp(item["created_at"]).isoformat(),
-                "progress": checkpoint_progress_label(item) or "默认进度",
-                "exact_restore": item.get("exact_restore", False),
                 "recovery_protection": item.get("kind") == "pre-restore",
             }
             for item in checkpoints
@@ -104,7 +117,7 @@ async def list_checkpoints(include_safety: bool = False) -> dict:
 )
 async def rename_checkpoint(checkpoint_id: str, name: str) -> dict:
     try:
-        checkpoint = CheckpointManager(find_project_dir()).rename(checkpoint_id, name)
+        checkpoint = _active_checkpoint_manager().rename(checkpoint_id, name)
         return {
             "success": True,
             "checkpoint_id": checkpoint["id"],
@@ -130,7 +143,7 @@ async def rename_checkpoint(checkpoint_id: str, name: str) -> dict:
 )
 async def compare_checkpoint(checkpoint_id: str) -> dict:
     try:
-        diff = CheckpointManager(find_project_dir()).diff(checkpoint_id)
+        diff = _active_checkpoint_manager().diff(checkpoint_id)
         return {"success": True, **diff.to_dict()}
     except CheckpointError as exc:
         return {"success": False, "error": str(exc)}
@@ -140,7 +153,8 @@ async def compare_checkpoint(checkpoint_id: str) -> dict:
     name="start_checkpoint_experiment",
     description=(
         "仅当用户明确要求从当前状态开始新的实验分支时使用。"
-        "不会修改文件。回复时称为‘实验分支’，不要暴露工具名或 Git 概念。"
+        "会创建独立实验工作区及 scripts、figures、plans、outputs、reports、data 等目录，"
+        "后续相对路径默认写入该实验。回复时称为‘实验’，不要暴露工具名或 Git 概念。"
     ),
     parameters={
         "type": "object",
@@ -152,11 +166,18 @@ async def compare_checkpoint(checkpoint_id: str) -> dict:
 )
 async def start_checkpoint_experiment(name: str) -> dict:
     try:
-        state = CheckpointManager(find_project_dir()).start_experiment(name)
+        project_dir = find_project_dir()
+        checkpoint_manager = _active_checkpoint_manager()
+        state = ExperimentManager(project_dir).create(
+            name,
+            base_checkpoint=checkpoint_manager.current_checkpoint_id(),
+        )
         return {
             "success": True,
-            "name": state["experiment"],
-            "base_checkpoint": state.get("experiment_base"),
+            "experiment_id": state["id"],
+            "name": state["name"],
+            "workspace": state["workspace"],
+            "base_checkpoint": state.get("base_checkpoint"),
         }
-    except CheckpointError as exc:
+    except (CheckpointError, ExperimentError) as exc:
         return {"success": False, "error": str(exc)}

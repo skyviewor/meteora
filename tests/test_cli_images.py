@@ -75,6 +75,46 @@ def test_checkpoint_output_enters_chat_view_from_startup():
     asyncio.run(check_view())
 
 
+def test_experiment_list_scrolls_to_bottom_after_markdown_layout():
+    from types import SimpleNamespace
+
+    async def check_scroll():
+        app = AeroApp(AeroConfig(), persist_config=False)
+        experiments = [
+            {
+                "id": f"exp-{index:02d}",
+                "name": f"实验 {index:02d}",
+                "status": "active",
+                "updated_at": index + 1,
+            }
+            for index in range(40)
+        ]
+        manager = SimpleNamespace(
+            list=lambda: experiments,
+            active=lambda: experiments[0],
+            workspace_path=lambda _experiment: app._project_dir,
+        )
+        app._get_experiment_mgr = lambda: manager
+
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._show_checkpoint_message("\n".join(f"历史记录 {index}" for index in range(80)))
+            await pilot.pause(0.1)
+
+            chat = app.query_one("#chat-area", ChatScroll)
+            chat.scroll_home(animate=False, force=True, immediate=True)
+            app._user_scrolled_up = True
+            await pilot.pause()
+            assert not chat.is_vertical_scroll_end
+
+            app._show_experiment_list()
+            await pilot.pause(0.5)
+
+            assert chat.is_vertical_scroll_end
+            assert app._user_scrolled_up is False
+
+    asyncio.run(check_scroll())
+
+
 def test_terminal_preview_is_cached_until_image_changes(tmp_path):
     image_path = tmp_path / "map.png"
     Image.new("RGB", (12, 8), (20, 40, 180)).save(image_path)

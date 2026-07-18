@@ -52,6 +52,7 @@ _SKIP_DIRS = {
     ".venv",
     "__pycache__",
     "node_modules",
+    "experiments",
 }
 
 
@@ -82,13 +83,20 @@ class CheckpointDiff:
 class CheckpointManager:
     """Create, compare, and restore checkpoints without touching the user's Git repo."""
 
-    def __init__(self, project_dir: str | Path, *, git_binary: str = "git"):
+    def __init__(
+        self,
+        project_dir: str | Path,
+        *,
+        git_binary: str = "git",
+        experiment_id: str | None = None,
+    ):
         self.project_dir = Path(project_dir).resolve()
         self.aero_dir = self.project_dir / ".aero"
         self.checkpoints_dir = self.aero_dir / "checkpoints"
         self.history_dir = self.aero_dir / "history.git"
         self.state_path = self.aero_dir / "checkpoint-state.json"
         self.git_binary = git_binary
+        self.experiment_id = experiment_id
 
     def create(
         self,
@@ -99,6 +107,7 @@ class CheckpointManager:
         model: dict[str, Any] | None = None,
         tool_ledger: list[dict[str, Any]] | None = None,
         kind: str = "manual",
+        related_experiment: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         state = self._read_state()
@@ -136,7 +145,10 @@ class CheckpointManager:
             "kind": kind,
             "created_at": created_at,
             "parent_id": parent_id,
-            "experiment": state.get("experiment", "main"),
+            "scope": "experiment" if self.experiment_id else "main",
+            "experiment": self.experiment_id or "main",
+            "experiment_id": self.experiment_id,
+            "related_experiment": related_experiment,
             "session_id": session_id,
             "session_file": session_file,
             "model": model or {},
@@ -240,11 +252,29 @@ class CheckpointManager:
         )
         return metadata
 
+    def clear(self) -> list[dict[str, Any]]:
+        """Remove every checkpoint snapshot and reset checkpoint pointers."""
+        checkpoints = self.list()
+        if self.checkpoints_dir.exists():
+            shutil.rmtree(self.checkpoints_dir)
+        if self.history_dir.exists():
+            shutil.rmtree(self.history_dir)
+
+        state = self._read_state()
+        state["current_checkpoint"] = None
+        state["experiment_base"] = None
+        self._write_state(state)
+        return checkpoints
+
     def diff(self, checkpoint: str) -> CheckpointDiff:
         metadata = self.load(checkpoint)
         if metadata is None:
             raise CheckpointError(f"找不到检查点：{checkpoint}")
-        target = {item["path"]: item for item in metadata.get("files", [])}
+        target = {
+            item["path"]: item
+            for item in metadata.get("files", [])
+            if self._path_in_scope(item.get("path", ""))
+        }
         current = {item["path"]: item for item in self.scan_workspace()}
         modified: list[str] = []
         missing: list[str] = []
@@ -280,7 +310,10 @@ class CheckpointManager:
             )
 
         target_exact = {
-            item["path"] for item in metadata.get("files", []) if item.get("restore") == "exact"
+            item["path"]
+            for item in metadata.get("files", [])
+            if item.get("restore") == "exact"
+            and self._path_in_scope(item.get("path", ""))
         }
         current_exact = {
             item["path"] for item in self.scan_workspace() if item.get("restore") == "exact"
@@ -311,6 +344,10 @@ class CheckpointManager:
         state["experiment_base"] = state.get("current_checkpoint")
         self._write_state(state)
         return state
+
+    def current_checkpoint_id(self) -> str | None:
+        """Return the current checkpoint identifier, if any."""
+        return self._read_state().get("current_checkpoint")
 
     def scan_workspace(self) -> list[dict[str, Any]]:
         files = []
@@ -351,6 +388,12 @@ class CheckpointManager:
         ):
             return "exact"
         return "reference"
+
+    def _path_in_scope(self, relative: str) -> bool:
+        """Keep legacy main checkpoints from crossing into experiment workspaces."""
+        if self.experiment_id is not None:
+            return True
+        return relative.split("/", 1)[0] != "experiments"
 
     @staticmethod
     def _fingerprint(path: Path, *, full: bool) -> str:
@@ -538,15 +581,3 @@ class CheckpointManager:
 def _chunks(values: list[str], size: int) -> Iterable[list[str]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
-
-
-def checkpoint_progress_label(checkpoint: dict[str, Any]) -> str:
-    """Return a user-facing label for a checkpoint's progress context."""
-    experiment = str(checkpoint.get("experiment") or "main").strip()
-    if not experiment or experiment == "main":
-        return ""
-    if experiment.startswith("restore-"):
-        return "恢复后的进度"
-    if experiment.startswith("恢复自「"):
-        return experiment
-    return f"实验：{experiment}"

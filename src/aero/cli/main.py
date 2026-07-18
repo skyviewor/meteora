@@ -93,6 +93,7 @@ from aero.data.plans import set_session_id
 from aero.data.pricing import TokenTracker, context_window_for, format_cost, format_token_count
 from aero.core.types import Message
 from aero.i18n import is_supported_language, language_label, language_options, t
+from aero.toolbox.paths import use_workspace
 
 DEEPSEEK_MODEL_ALIASES = {
     "flash": "deepseek-v4-flash",
@@ -908,7 +909,9 @@ class ChatMarkdownBulletList(MarkdownBulletList):
             bullet = MarkdownBullet()
             bullet.symbol = block.bullet
             is_safety = any(
-                "恢复保护 ·" in child._content.plain for child in block._blocks
+                "恢复前安全检查点：" in child._content.plain
+                or "恢复保护 ·" in child._content.plain
+                for child in block._blocks
             )
             yield Horizontal(
                 bullet,
@@ -925,6 +928,10 @@ class ChatMarkdown(Markdown):
         **Markdown.BLOCKS,
         "bullet_list_open": ChatMarkdownBulletList,
     }
+
+    def __init__(self, *args, force_scroll_on_ready: bool = False, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.force_scroll_on_ready = force_scroll_on_ready
 
     def update(self, markdown: str) -> object:
         return super().update(_render_terminal_math(markdown))
@@ -1361,10 +1368,16 @@ class AeroApp(App):
         Binding("tab", "cycle_mode", "切换模式", show=False),
     ]
 
-    def __init__(self, config: AeroConfig, persist_config: bool = True):
+    def __init__(
+        self,
+        config: AeroConfig,
+        persist_config: bool = True,
+        resume_last_session: bool = False,
+    ):
         super().__init__()
         self.config = config
         self.persist_config = persist_config
+        self._resume_last_session = resume_last_session
         self.agent = None
         self.last_error = ""
         self._agent_msg: Markdown | None = None
@@ -1398,6 +1411,10 @@ class AeroApp(App):
         self._image_attachments: list[Path] = []
         self._session_mgr = None  # Lazy init
         self._checkpoint_mgr = None  # Lazy init
+        self._experiment_mgr = None  # Lazy init
+        self._experiment_session_mgr = None  # Lazy init
+        self._experiment_finish_worker: Worker | None = None
+        self._project_dir = Path.cwd().resolve()
         self._session_id: str | None = None
         self._session_saved_on_exit = False
         self._session_title_workers: set[str] = set()
@@ -1453,6 +1470,12 @@ class AeroApp(App):
         self._footer_status = self.query_one("#footer-status", Static)
         self._refresh_commands()
         self._set_input_focus_style(True)
+        active_experiment = self._get_experiment_mgr().active()
+        if active_experiment is not None:
+            self._load_experiment_slot(active_experiment["id"])
+            self._set_footer_status(f"当前实验：{active_experiment['name']}")
+        elif self._resume_last_session:
+            self._resume_latest_project_session()
 
     def _set_input_focus_style(self, active: bool) -> None:
         input_box = self.query_one("#input-box")
@@ -1506,6 +1529,26 @@ class AeroApp(App):
 
     def _scroll_chat_to_end(self) -> None:
         self._maybe_scroll_to_end()
+
+    def _force_scroll_chat_to_end(self) -> None:
+        """Scroll after dynamic Markdown has finished changing the layout height."""
+        self._user_scrolled_up = False
+        chat = self.query_one("#chat-area", VerticalScroll)
+        chat.scroll_end(
+            animate=False,
+            force=True,
+            immediate=True,
+        )
+
+    def on_markdown_table_of_contents_updated(
+        self, event: Markdown.TableOfContentsUpdated
+    ) -> None:
+        markdown = event.markdown
+        if not isinstance(markdown, ChatMarkdown) or not markdown.force_scroll_on_ready:
+            return
+        markdown.force_scroll_on_ready = False
+        self._force_scroll_chat_to_end()
+        self.call_after_refresh(self._force_scroll_chat_to_end)
 
     def _mount_compact_summary_block(self, summary_text: str) -> CompactSummaryBlock:
         chat = self.query_one("#chat-area", VerticalScroll)
@@ -1584,6 +1627,23 @@ class AeroApp(App):
             self._model_status_text(markup=False),
             "",
         ]
+
+    def _chat_transcript(self) -> list[dict[str, str]]:
+        """Return display-only history without adding it to the LLM context."""
+        transcript: list[dict[str, str]] = []
+        prefixes = (("你:\n", "user"), ("Aero:\n", "assistant"))
+        for entry in self._chat_log:
+            for prefix, role in prefixes:
+                if entry.startswith(prefix):
+                    transcript.append({"role": role, "content": entry[len(prefix) :]})
+                    break
+            else:
+                compact_prefix = "[上下文压缩总结]\n"
+                if entry.startswith(compact_prefix):
+                    transcript.append(
+                        {"role": "summary", "content": entry[len(compact_prefix) :]}
+                    )
+        return transcript
 
     def _ready_subtitle(self) -> str:
         return t("app.ready", self.config.language)
@@ -2002,7 +2062,12 @@ class AeroApp(App):
             return
 
         if text == "/checkpoint" or text.startswith("/checkpoint "):
-            self._handle_checkpoint_command(text)
+            await self._handle_checkpoint_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/checkpoints clear" or text.startswith("/checkpoints clear "):
+            await self._handle_clear_checkpoints_command(text)
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -2017,7 +2082,12 @@ class AeroApp(App):
             return
 
         if text == "/experiment" or text.startswith("/experiment "):
-            self._handle_experiment_command(text)
+            await self._handle_experiment_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/experiments" or text.startswith("/experiments "):
+            await self._handle_experiments_command(text)
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -2187,7 +2257,18 @@ class AeroApp(App):
         """Resolve image references in a chat message to existing local files."""
         resolved_paths: list[Path] = []
         seen: set[Path] = set()
-        search_dirs = [Path("."), Path("data"), Path(".") / "data"]
+        experiment = self._get_experiment_mgr().active()
+        workspace = (
+            self._get_experiment_mgr().workspace_path(experiment)
+            if experiment is not None
+            else self._project_dir
+        )
+        search_dirs = [
+            workspace,
+            workspace / "data",
+            self._project_dir,
+            self._project_dir / "data",
+        ]
         for raw_path in extract_image_paths(text)[:4]:
             resolved = None
             for base in search_dirs:
@@ -2198,7 +2279,7 @@ class AeroApp(App):
             if resolved is None:
                 p = Path(raw_path).expanduser()
                 if not p.is_absolute():
-                    p = (Path(".") / p).resolve()
+                    p = (workspace / p).resolve()
                 if p.exists() and p.is_file():
                     resolved = p.resolve()
             if resolved is None or resolved in seen:
@@ -2392,6 +2473,7 @@ class AeroApp(App):
             ("/checkpoints", t("cmd.checkpoints", self.config.language)),
             ("/restore", t("cmd.restore", self.config.language)),
             ("/experiment", t("cmd.experiment", self.config.language)),
+            ("/experiments", t("cmd.experiments", self.config.language)),
             ("/compact", t("cmd.compact", self.config.language)),
             ("/instructions", t("cmd.instructions", self.config.language)),
             ("/subagent", t("cmd.subagent", self.config.language)),
@@ -2405,8 +2487,13 @@ class AeroApp(App):
             ("/checkpoint delete ", "永久删除指定检查点"),
             ("/checkpoint rename ", "修改指定检查点的名称"),
             ("/checkpoints all", "包含恢复保护记录的完整列表"),
+            ("/checkpoints clear", "清理全部检查点"),
             ("/restore ", "预览差异并恢复检查点"),
-            ("/experiment ", "从当前状态开始实验分支"),
+            ("/experiment new ", "创建独立实验工作区"),
+            ("/experiment delete ", "永久删除指定实验"),
+            ("/experiment finish", "总结并完成当前实验"),
+            ("/experiments switch ", "切换到指定实验"),
+            ("/experiments clear", "清理全部实验"),
             ("/instructions clear", "清空当前项目指令"),
             ("/subagent list", "查看后台任务"),
             ("/subagent cancel ", "取消后台任务"),
@@ -2685,14 +2772,55 @@ class AeroApp(App):
         return self._session_mgr
 
     def _get_checkpoint_mgr(self):
+        active_experiment = self._get_experiment_mgr().active()
+        if active_experiment is not None:
+            from aero.checkpoints import CheckpointManager
+
+            workspace = self._get_experiment_mgr().workspace_path(active_experiment)
+            return CheckpointManager(
+                workspace,
+                experiment_id=active_experiment["id"],
+            )
+        return self._get_main_checkpoint_mgr()
+
+    def _get_main_checkpoint_mgr(self):
         if self._checkpoint_mgr is None:
             from aero.checkpoints import CheckpointManager
 
-            self._checkpoint_mgr = CheckpointManager(Path.cwd())
+            self._checkpoint_mgr = CheckpointManager(self._project_dir)
         return self._checkpoint_mgr
 
-    def _handle_checkpoint_command(self, text: str) -> None:
+    def _get_experiment_mgr(self):
+        if self._experiment_mgr is None:
+            from aero.experiments import ExperimentManager
+
+            self._experiment_mgr = ExperimentManager(self._project_dir)
+        return self._experiment_mgr
+
+    def _get_experiment_session_mgr(self):
+        if self._experiment_session_mgr is None:
+            from aero.agent.session import SessionManager
+
+            self._experiment_session_mgr = SessionManager(
+                self._project_dir / ".aero" / "experiment-sessions"
+            )
+        return self._experiment_session_mgr
+
+    def _resume_latest_project_session(self) -> bool:
+        latest = self._get_session_mgr().latest_session(self._project_dir)
+        if latest is None:
+            message = t("app.session_no_history", self.config.language)
+            self._set_footer_status(message)
+            self.notify(message, severity="warning", timeout=3)
+            return False
+        self._do_load_session(latest.id)
+        return True
+
+    async def _handle_checkpoint_command(self, text: str) -> None:
         name = text.split(maxsplit=1)[1].strip() if " " in text.strip() else ""
+        if not name:
+            self._set_footer_status("正在生成检查点标题…")
+            name = await self._generate_checkpoint_title()
         try:
             checkpoint = self._create_checkpoint(name=name, kind="manual")
             exact = sum(1 for item in checkpoint["files"] if item["restore"] == "exact")
@@ -2700,9 +2828,16 @@ class AeroApp(App):
             capability = (
                 "支持文件恢复" if checkpoint["exact_restore"] else "仅保存数据清单"
             )
+            active_experiment = self._get_experiment_mgr().active()
+            owner = (
+                f"实验：{active_experiment['name']}"
+                if active_experiment is not None
+                else "主流程"
+            )
             message = (
                 "### 检查点已创建\n\n"
                 f"**{checkpoint['name']}**  `{checkpoint['id']}`\n\n"
+                f"- 所属：{owner}\n"
                 f"- 可恢复文件：{exact} 个\n"
                 f"- 仅记录数据：{references} 个\n"
                 f"- 恢复能力：{capability}"
@@ -2713,40 +2848,66 @@ class AeroApp(App):
         except Exception as exc:
             self._show_checkpoint_message(f"检查点创建失败：{exc}")
 
+    async def _generate_checkpoint_title(self) -> str:
+        messages = self.agent.messages if self.agent is not None else []
+        fallback = _checkpoint_title_from_messages(messages) or "当前工作进度"
+        client = None
+        try:
+            from aero.agent.llm_client import LLMConfig, LLMClient
+
+            llm_cfg = LLMConfig(
+                provider=self.config.llm.provider,
+                model=self.config.llm.model,
+                api_key=self.config.llm.active_api_key(),
+                base_url=self.config.llm.base_url,
+            )
+            client = LLMClient(llm_cfg)
+            prompt = _checkpoint_title_prompt(messages, self.config.language)
+            title = await client.chat([Message(role="user", content=prompt)])
+            return _normalize_checkpoint_title(title) or fallback
+        except Exception as exc:
+            debug_log("tui.checkpoint_title_generation_failed", error=str(exc))
+            return fallback
+        finally:
+            if client is not None:
+                try:
+                    await client.close()
+                except Exception as exc:
+                    debug_log("tui.checkpoint_title_client_close_failed", error=str(exc))
+
     def _handle_checkpoints_command(self, text: str = "/checkpoints") -> None:
         argument = text.split(maxsplit=1)[1].strip().lower() if " " in text.strip() else ""
         if argument not in {"", "all"}:
             self._show_checkpoint_message("用法：`/checkpoints` 或 `/checkpoints all`。")
             return
         all_checkpoints = self._get_checkpoint_mgr().list()
+        active_experiment = self._get_experiment_mgr().active()
+        scope_name = (
+            f"实验“{active_experiment['name']}”"
+            if active_experiment is not None
+            else "主流程"
+        )
         safety = [item for item in all_checkpoints if item.get("kind") == "pre-restore"]
         checkpoints = all_checkpoints if argument == "all" else [
             item for item in all_checkpoints if item.get("kind") != "pre-restore"
         ]
         if not checkpoints:
-            message = "还没有用户创建的检查点。使用 `/checkpoint 名称` 创建一个。"
+            message = (
+                f"{scope_name}还没有用户创建的检查点。"
+                "使用 `/checkpoint 名称` 创建一个。"
+            )
             if safety:
                 message += f"\n\n另有 {len(safety)} 条恢复保护记录，可用 `/checkpoints all` 查看。"
             self._show_checkpoint_message(message)
             return
-        title = "全部检查点" if argument == "all" else "检查点"
+        title = (
+            f"{scope_name}全部检查点"
+            if argument == "all"
+            else f"{scope_name}检查点"
+        )
         lines = [f"### {title}", ""]
-        from aero.checkpoints import checkpoint_progress_label
-
         for item in checkpoints:
-            created = datetime.fromtimestamp(item["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
-            exact = sum(1 for file in item.get("files", []) if file.get("restore") == "exact")
-            refs = len(item.get("files", [])) - exact
-            marker = "恢复保护 · " if item.get("kind") == "pre-restore" else ""
-            details = [created]
-            progress = checkpoint_progress_label(item)
-            if progress:
-                details.append(progress)
-            details.extend([f"可恢复文件 {exact}", f"仅记录数据 {refs}"])
-            lines.append(
-                f"- `{item['id']}`  **{item['name']}**  "
-                f"{marker}{' · '.join(details)}"
-            )
+            lines.append(_format_checkpoint_list_entry(item))
         if safety and argument != "all":
             lines.extend(
                 [
@@ -2754,8 +2915,53 @@ class AeroApp(App):
                     f"已隐藏 {len(safety)} 条恢复保护记录；使用 `/checkpoints all` 查看。",
                 ]
             )
-        lines.extend(["", "使用 `/restore 检查点ID` 预览差异并恢复。"])
+        lines.extend(["", "使用 `/restore 检查点名称或ID` 预览差异并恢复。"])
         self._show_checkpoint_message("\n".join(lines))
+
+    async def _handle_clear_checkpoints_command(self, text: str) -> None:
+        if text.strip() != "/checkpoints clear":
+            self._show_checkpoint_message("用法：`/checkpoints clear`。")
+            return
+        manager = self._get_checkpoint_mgr()
+        checkpoints = manager.list()
+        if not checkpoints:
+            self._show_checkpoint_message("当前没有可清理的检查点。")
+            return
+
+        safety_count = sum(
+            1 for item in checkpoints if item.get("kind") == "pre-restore"
+        )
+        manual_count = len(checkpoints) - safety_count
+        confirmation_message = (
+            "清理全部检查点后：\n\n"
+            f"- 用户检查点：{manual_count} 个\n"
+            f"- 恢复保护记录：{safety_count} 个\n\n"
+            "所有检查点快照和恢复记录都会永久删除。"
+            "项目文件、data/、会话历史和配置不会受到影响。"
+        )
+        self.screen.add_class("confirming")
+        try:
+            choice = await self.push_screen_wait(
+                ConfirmScreen(
+                    confirmation_message,
+                    self.config.language,
+                    title=t("confirm.checkpoints_clear_title", self.config.language),
+                    allow_label=t("confirm.checkpoints_clear", self.config.language),
+                    deny_label=t("confirm.cancel", self.config.language),
+                    show_always=False,
+                )
+            )
+        finally:
+            self.screen.remove_class("confirming")
+        if _normalize_confirm_choice(choice) not in {"approve", "allow", "always"}:
+            self._show_checkpoint_message("已取消清理，检查点保持不变。")
+            return
+
+        try:
+            removed = manager.clear()
+            self._show_checkpoint_message(f"已清理全部 {len(removed)} 个检查点。")
+        except Exception as exc:
+            self._show_checkpoint_message(f"检查点清理失败：{exc}")
 
     async def _handle_delete_checkpoint_command(self, text: str) -> None:
         parts = text.split(maxsplit=2)
@@ -2888,21 +3094,463 @@ class AeroApp(App):
         except Exception as exc:
             self._show_checkpoint_message(f"检查点恢复失败：{exc}")
 
-    def _handle_experiment_command(self, text: str) -> None:
-        name = text.split(maxsplit=1)[1].strip() if " " in text.strip() else ""
-        try:
-            state = self._get_checkpoint_mgr().start_experiment(name)
-            base = state.get("experiment_base") or "当前工作区"
+    async def _handle_experiment_command(self, text: str) -> None:
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) == 1:
             self._show_checkpoint_message(
-                f"已开始实验分支 **{state['experiment']}**，起点：`{base}`。"
+                "用法：`/experiment new 实验名称` 创建，`/experiment finish` 完成，"
+                "或 `/experiment delete 实验ID` 删除。"
+            )
+            return
+        action = parts[1].lower()
+        if action == "finish":
+            self._start_finishing_active_experiment()
+            return
+        if action == "delete":
+            target = parts[2].strip() if len(parts) > 2 else ""
+            await self._delete_experiment(target)
+            return
+        name = (
+            parts[2].strip()
+            if action == "new" and len(parts) > 2
+            else " ".join(parts[1:])
+        )
+        if not name:
+            self._show_checkpoint_message("请输入实验名称，例如：`/experiment new 臭氧敏感性`。")
+            return
+        self._start_experiment(name)
+
+    async def _handle_experiments_command(self, text: str) -> None:
+        parts = text.strip().split(maxsplit=2)
+        if len(parts) == 1:
+            self._show_experiment_list()
+            return
+        if parts[1].lower() == "clear":
+            await self._clear_experiments()
+            return
+        if parts[1].lower() != "switch" or len(parts) < 3:
+            self._show_checkpoint_message(
+                "用法：`/experiments` 查看列表，`/experiments switch 实验ID` 切换，"
+                "或 `/experiments clear` 清理全部实验。"
+            )
+            return
+        self._switch_experiment(parts[2].strip())
+
+    def _start_finishing_active_experiment(self) -> None:
+        experiment = self._get_experiment_mgr().active()
+        if experiment is None:
+            self._show_checkpoint_message("当前没有正在进行的实验。")
+            return
+        if (
+            self._experiment_finish_worker is not None
+            and self._experiment_finish_worker.is_running
+        ):
+            self._show_checkpoint_message(
+                f"正在总结实验 **{experiment['name']}**，请稍候。",
+                force_scroll=True,
+            )
+            return
+        self._show_checkpoint_message(
+            f"正在总结实验 **{experiment['name']}** 并生成文字报告…",
+            force_scroll=True,
+        )
+        self._set_footer_status(f"正在完成实验：{experiment['name']}")
+        debug_log(
+            "tui.experiment_finish_started",
+            experiment_id=experiment["id"],
+            experiment_name=experiment["name"],
+        )
+        self._experiment_finish_worker = self.run_worker(
+            self._finish_active_experiment(experiment["id"]),
+            exclusive=False,
+            group="experiment-finish",
+        )
+
+    async def _delete_experiment(self, target: str) -> None:
+        if not target:
+            self._show_checkpoint_message(
+                "用法：`/experiment delete 实验ID`。先用 `/experiments` 查看列表。"
+            )
+            return
+        manager = self._get_experiment_mgr()
+        try:
+            experiment = manager.load(target)
+            if experiment is None:
+                raise ValueError(f"找不到实验：{target}")
+            workspace = manager.workspace_path(experiment)
+            file_count = len(manager.artifacts(experiment))
+            from aero.checkpoints import CheckpointManager
+
+            checkpoint_count = len(
+                CheckpointManager(
+                    workspace, experiment_id=experiment["id"]
+                ).list()
             )
         except Exception as exc:
-            self._show_checkpoint_message(f"无法开始实验分支：{exc}")
+            self._show_checkpoint_message(f"无法读取实验：{exc}")
+            return
+        message = (
+            f"永久删除实验“{experiment['name']}”后：\n\n"
+            f"- 实验目录：{workspace.relative_to(self._project_dir)}\n"
+            f"- 目录内文件：{file_count} 个\n"
+            f"- 实验检查点：{checkpoint_count} 个\n\n"
+            "实验文件、报告、元数据和专属对话都会被删除，且无法恢复。"
+        )
+        if not await self._confirm_experiment_removal(
+            message,
+            title=t("confirm.experiment_delete_title", self.config.language),
+            allow_label=t("confirm.experiment_delete", self.config.language),
+        ):
+            self._show_checkpoint_message("已取消删除，实验保持不变。")
+            return
+        active = manager.active()
+        deleting_active = active is not None and active["id"] == experiment["id"]
+        try:
+            if deleting_active:
+                self._save_experiment_slot(experiment["id"], experiment["name"])
+            deleted = manager.delete(experiment["id"])
+            self._get_experiment_session_mgr().delete(experiment["id"])
+            if deleting_active:
+                next_active = manager.active()
+                self._load_experiment_slot(
+                    next_active["id"] if next_active else "__main__"
+                )
+                if self.agent is not None:
+                    self.agent.reset_system_prompt(self.config.language)
+            self._show_checkpoint_message(f"已删除实验 **{deleted['name']}**。")
+        except Exception as exc:
+            self._show_checkpoint_message(f"实验删除失败：{exc}")
+
+    async def _clear_experiments(self) -> None:
+        manager = self._get_experiment_mgr()
+        experiments = manager.list()
+        if not experiments:
+            self._show_checkpoint_message("当前没有可清理的实验。")
+            return
+        file_count = sum(len(manager.artifacts(item)) for item in experiments)
+        from aero.checkpoints import CheckpointManager
+
+        checkpoint_count = sum(
+            len(
+                CheckpointManager(
+                    manager.workspace_path(item), experiment_id=item["id"]
+                ).list()
+            )
+            for item in experiments
+        )
+        message = (
+            f"清理全部实验后：\n\n- 实验：{len(experiments)} 个\n"
+            f"- 实验目录内文件：{file_count} 个\n"
+            f"- 实验检查点：{checkpoint_count} 个\n\n"
+            "所有实验目录、报告、元数据和实验专属对话都会被永久删除。"
+            "主项目文件、检查点和普通聊天历史不会受到影响。"
+        )
+        if not await self._confirm_experiment_removal(
+            message,
+            title=t("confirm.experiments_clear_title", self.config.language),
+            allow_label=t("confirm.experiments_clear", self.config.language),
+        ):
+            self._show_checkpoint_message("已取消清理，实验保持不变。")
+            return
+        try:
+            removed = manager.clear()
+            session_manager = self._get_experiment_session_mgr()
+            for experiment in removed:
+                session_manager.delete(experiment["id"])
+            self._load_experiment_slot("__main__")
+            if self.agent is not None:
+                self.agent.reset_system_prompt(self.config.language)
+            self._show_checkpoint_message(f"已清理全部 {len(removed)} 个实验。")
+        except Exception as exc:
+            self._show_checkpoint_message(f"实验清理失败：{exc}")
+
+    async def _confirm_experiment_removal(
+        self, message: str, *, title: str, allow_label: str
+    ) -> bool:
+        self.screen.add_class("confirming")
+        try:
+            choice = await self.push_screen_wait(
+                ConfirmScreen(
+                    message,
+                    self.config.language,
+                    title=title,
+                    allow_label=allow_label,
+                    deny_label=t("confirm.cancel", self.config.language),
+                    show_always=False,
+                )
+            )
+        finally:
+            self.screen.remove_class("confirming")
+        return _normalize_confirm_choice(choice) in {"approve", "allow", "always"}
+
+    def _start_experiment(self, name: str) -> None:
+        try:
+            manager = self._get_experiment_mgr()
+            current = manager.active()
+            source_slot = current["id"] if current else "__main__"
+            self._save_experiment_slot(
+                source_slot, current["name"] if current else "主项目"
+            )
+            base_messages = copy.deepcopy(self.agent.messages) if self.agent is not None else []
+            experiment = manager.create(
+                name,
+                base_checkpoint=self._get_checkpoint_mgr().current_checkpoint_id(),
+            )
+            self._save_experiment_slot(
+                experiment["id"], experiment["name"], messages=base_messages
+            )
+            if self.agent is not None:
+                self.agent.reset_system_prompt(self.config.language)
+            workspace = manager.workspace_path(experiment).relative_to(self._project_dir)
+            self._show_checkpoint_message(
+                f"### 实验已创建\n\n**{experiment['name']}**  `{experiment['id']}`\n\n"
+                f"工作目录：`{workspace}`\n\n"
+                "后续脚本、图片、计划、输出和临时文件会优先写入该实验目录。"
+            )
+        except Exception as exc:
+            self._show_checkpoint_message(f"无法创建实验：{exc}")
+
+    def _show_experiment_list(self) -> None:
+        manager = self._get_experiment_mgr()
+        experiments = manager.list()
+        active = manager.active()
+        if not experiments:
+            self._show_checkpoint_message(
+                "还没有实验。使用 `/experiment new 实验名称` 创建一个。",
+                force_scroll=True,
+            )
+            return
+        lines = ["### 实验", ""]
+        for item in experiments:
+            marker = " **当前**" if active and item["id"] == active["id"] else ""
+            status = "已完成" if item.get("status") == "completed" else "进行中"
+            timestamp = datetime.fromtimestamp(item["updated_at"]).strftime(
+                "%Y-%m-%d %H:%M"
+            )
+            lines.append(
+                f"- `{item['id']}`  **{item['name']}** · {status} · {timestamp}{marker}"
+            )
+        lines.extend(
+            [
+                "",
+                "使用 `/experiments switch 实验ID` 切换；使用 `main` 返回主项目；"
+                "使用 `/experiment delete 实验ID` 删除。",
+            ]
+        )
+        self._show_checkpoint_message("\n".join(lines), force_scroll=True)
+
+    def _switch_experiment(self, target: str) -> None:
+        try:
+            manager = self._get_experiment_mgr()
+            current = manager.active()
+            source_slot = current["id"] if current else "__main__"
+            self._save_experiment_slot(
+                source_slot, current["name"] if current else "主项目"
+            )
+            if target.lower() in {"main", "主项目"}:
+                manager.leave()
+                selected = None
+                target_slot = "__main__"
+            else:
+                selected = manager.switch(target)
+                target_slot = selected["id"]
+            self._load_experiment_slot(target_slot)
+            if self.agent is not None:
+                self.agent.reset_system_prompt(self.config.language)
+            label = selected["name"] if selected else "主项目"
+            self._show_checkpoint_message(f"已切换到 **{label}**。")
+        except Exception as exc:
+            self._show_checkpoint_message(f"无法切换实验：{exc}")
+
+    async def _finish_active_experiment(self, experiment_id: str) -> None:
+        try:
+            manager = self._get_experiment_mgr()
+            experiment = manager.active()
+            if experiment is None or experiment["id"] != experiment_id:
+                self._show_checkpoint_message(
+                    "实验已被切换，已停止生成完成报告。", force_scroll=True
+                )
+                return
+            self._save_experiment_slot(experiment["id"], experiment["name"])
+            messages = (
+                copy.deepcopy(self.agent.messages) if self.agent is not None else []
+            )
+            artifacts = manager.artifacts(experiment)
+            report = await self._generate_experiment_report(
+                experiment, messages, artifacts
+            )
+            completed = manager.complete(experiment["id"], report)
+            finish_checkpoint = None
+            finish_checkpoint_error = ""
+            try:
+                finish_checkpoint = self._create_experiment_finish_checkpoint(completed)
+            except Exception as exc:
+                finish_checkpoint_error = str(exc)
+                debug_log(
+                    "tui.experiment_finish_checkpoint_failed",
+                    experiment_id=completed["id"],
+                    error=repr(exc),
+                )
+            report_path = completed["report"]
+            completion_message = (
+                f"### 实验已完成\n\n**{completed['name']}**\n\n"
+                f"报告已保存到 [{report_path}]({report_path})。"
+                "当前仍停留在该实验，可继续查看历史或补充分析；"
+                "需要离开时使用 `/experiments switch main`。\n\n"
+                f"{report}"
+            )
+            if finish_checkpoint is not None:
+                completion_message += (
+                    "\n\n主流程检查点已创建："
+                    f"**{finish_checkpoint['name']}** `{finish_checkpoint['id']}`"
+                )
+            elif finish_checkpoint_error:
+                completion_message += (
+                    f"\n\n> 主流程实验结束检查点创建失败：{finish_checkpoint_error}"
+                )
+            if self.agent is not None:
+                self.agent.messages.append(
+                    Message(
+                        role="assistant",
+                        content=(
+                            f"[实验完成摘要]\n实验：{completed['name']}\n"
+                            f"报告：{report_path}\n\n{report}"
+                        ),
+                    )
+                )
+                self._save_experiment_slot(completed["id"], completed["name"])
+            self._show_checkpoint_message(completion_message, force_scroll=True)
+        except Exception as exc:
+            debug_log("tui.experiment_finish_failed", error=repr(exc))
+            self._show_checkpoint_message(
+                f"无法完成实验：{exc}", force_scroll=True
+            )
+        finally:
+            self._experiment_finish_worker = None
+            self._refresh_model_info()
+
+    def _create_experiment_finish_checkpoint(self, experiment: dict) -> dict:
+        session_snapshot = self._get_experiment_session_mgr().snapshot("__main__")
+        if session_snapshot is None and self._session_id:
+            session_snapshot = self._get_session_mgr().snapshot(self._session_id)
+        model = {
+            "provider": self.config.llm.provider,
+            "model": self.config.llm.model,
+            "vision_model": self.config.vision.model,
+            "mode": self.config.mode,
+        }
+        return self._get_main_checkpoint_mgr().create(
+            f"实验结束：{experiment['name']}",
+            session_id=self._session_id,
+            session_snapshot=session_snapshot,
+            model=model,
+            tool_ledger=[],
+            kind="experiment-finish",
+            related_experiment={
+                "id": experiment["id"],
+                "name": experiment["name"],
+                "report": experiment.get("report") or "",
+            },
+        )
+
+    async def _generate_experiment_report(
+        self, experiment: dict, messages: list[Message], artifacts: list[str]
+    ) -> str:
+        fallback = _fallback_experiment_report(experiment, messages, artifacts)
+        client = None
+        try:
+            from aero.agent.llm_client import LLMConfig, LLMClient
+
+            client = LLMClient(
+                LLMConfig(
+                    provider=self.config.llm.provider,
+                    model=self.config.llm.model,
+                    api_key=self.config.llm.active_api_key(),
+                    base_url=self.config.llm.base_url,
+                )
+            )
+            report = await client.chat(
+                [
+                    Message(
+                        role="user",
+                        content=_experiment_report_prompt(
+                            experiment, messages, artifacts
+                        ),
+                    )
+                ]
+            )
+            return report.strip() or fallback
+        except Exception as exc:
+            debug_log("tui.experiment_report_generation_failed", error=str(exc))
+            return fallback
+        finally:
+            if client is not None:
+                with suppress(Exception):
+                    await client.close()
+
+    def _save_experiment_slot(
+        self,
+        slot_id: str,
+        name: str,
+        *,
+        messages: list[Message] | None = None,
+    ) -> None:
+        if self.agent is None:
+            return
+        from aero.agent.session import SessionMeta
+
+        saved_messages = messages if messages is not None else self.agent.messages
+        meta = SessionMeta(
+            id=slot_id,
+            name=name,
+            message_count=len(saved_messages),
+            tracker=self.agent.tracker.to_dict(),
+            model=self.config.llm.model,
+            provider=self.config.llm.provider,
+            vision_model=self.config.vision.model,
+            mode=self.config.mode,
+            title_source="experiment",
+            project_dir=str(self._project_dir),
+            transcript=self._chat_transcript(),
+        )
+        self._get_experiment_session_mgr().save(slot_id, saved_messages, meta)
+
+    def _load_experiment_slot(self, slot_id: str) -> None:
+        if self.agent is None:
+            self._init_agent()
+        loaded = self._get_experiment_session_mgr().load(slot_id)
+        if self.agent is None:
+            return
+        if loaded is None:
+            system_message = self.agent.messages[0] if self.agent.messages else None
+            self.agent.messages = [system_message] if system_message is not None else []
+            self.agent.tracker = TokenTracker()
+            transcript = []
+        else:
+            messages, meta = loaded
+            self.agent.messages = messages
+            self.agent.tracker = TokenTracker.from_dict(meta.tracker)
+            transcript = meta.transcript
+        chat = self.query_one("#chat-area", VerticalScroll)
+        chat.remove_children()
+        self._mount_chat_title()
+        self._render_loaded_session_messages(self.agent.messages, transcript)
+        self._agent_msg = None
+        self._status_msg = None
+        self._status_sessions = []
+        self._enter_chat_mode()
 
     def _create_checkpoint(self, *, name: str, kind: str) -> dict:
         self._auto_save_session()
         session_snapshot = None
-        if self._session_id:
+        active_experiment = self._get_experiment_mgr().active()
+        checkpoint_session_id = self._session_id
+        if active_experiment is not None:
+            checkpoint_session_id = active_experiment["id"]
+            session_snapshot = self._get_experiment_session_mgr().snapshot(
+                active_experiment["id"]
+            )
+        elif self._session_id:
             session_snapshot = self._get_session_mgr().snapshot(self._session_id)
         model = {
             "provider": self.config.llm.provider,
@@ -2913,7 +3561,7 @@ class AeroApp(App):
         ledger = _checkpoint_tool_ledger(self.agent.messages if self.agent else [])
         return self._get_checkpoint_mgr().create(
             name,
-            session_id=self._session_id,
+            session_id=checkpoint_session_id,
             session_snapshot=session_snapshot,
             model=model,
             tool_ledger=ledger,
@@ -2936,14 +3584,22 @@ class AeroApp(App):
         chat = self.query_one("#chat-area", VerticalScroll)
         chat.remove_children()
         self._mount_chat_title()
-        self._render_loaded_session_messages(messages)
+        self._render_loaded_session_messages(messages, meta.transcript)
 
-    def _show_checkpoint_message(self, message: str) -> None:
+    def _show_checkpoint_message(
+        self, message: str, *, force_scroll: bool = False
+    ) -> None:
+        if force_scroll:
+            self._user_scrolled_up = False
         self._enter_chat_mode()
-        self._mount_agent_message_sync(message)
+        self._mount_agent_message_sync(message, force_scroll=force_scroll)
         self._chat_log.append(f"Aero:\n{message}")
         self._last_reply_text = message
         self._maybe_scroll_to_end()
+        if force_scroll:
+            self._force_scroll_chat_to_end()
+            self.call_after_refresh(self._force_scroll_chat_to_end)
+            self.set_timer(0.05, self._force_scroll_chat_to_end)
 
     def _handle_session_command(self, text: str) -> None:
         parts = text.split(maxsplit=2)
@@ -2989,7 +3645,12 @@ class AeroApp(App):
         self._maybe_scroll_to_end()
 
     def _auto_save_session(self, name: str = "", title_source: str = "") -> None:
-        if self.agent is None or len(self.agent.messages) <= 1:
+        transcript = self._chat_transcript()
+        if self.agent is None or (len(self.agent.messages) <= 1 and not transcript):
+            return
+        active_experiment = self._get_experiment_mgr().active()
+        if active_experiment is not None:
+            self._save_experiment_slot(active_experiment["id"], active_experiment["name"])
             return
         mgr = self._get_session_mgr()
         from aero.agent.session import SessionMeta
@@ -3007,6 +3668,17 @@ class AeroApp(App):
         elif existing is not None and existing[1].name:
             name = existing[1].name
             source = existing[1].title_source
+        elif len(self.agent.messages) <= 1 and transcript:
+            first_line = next(
+                (
+                    line.strip(" #*`_")
+                    for line in transcript[0]["content"].splitlines()
+                    if line.strip()
+                ),
+                "本地命令记录",
+            )
+            name = _normalize_generated_session_title(first_line) or "本地命令记录"
+            source = "local"
         else:
             name = _session_title_from_messages(self.agent.messages) or sid
             source = "pending"
@@ -3020,6 +3692,8 @@ class AeroApp(App):
             vision_model=self.config.vision.model,
             mode=self.config.mode,
             title_source=source,
+            project_dir=str(self._project_dir),
+            transcript=transcript,
         )
         mgr.save(sid, self.agent.messages, meta)
         if self._pending_session_title and meta.title_source == "manual":
@@ -3176,13 +3850,15 @@ class AeroApp(App):
         self.agent.messages = messages
         self.agent.tracker = TokenTracker.from_dict(meta.tracker)
         self.config.mode = meta.mode or self.config.mode
+        self.agent.config.mode = self.config.mode
+        self.agent.reset_system_prompt(lang)
         self._session_id = session_id
         set_session_id(session_id)
         self._pending_session_title = ""
         self._enter_chat_mode()
         chat.remove_children()
         self._mount_chat_title()
-        self._render_loaded_session_messages(messages)
+        self._render_loaded_session_messages(messages, meta.transcript)
         self._agent_msg = None
         self._status_msg = None
         self._status_sessions.clear()
@@ -3194,7 +3870,15 @@ class AeroApp(App):
         )
         self.query_one("#user-input", TextArea).focus()
 
-    def _render_loaded_session_messages(self, messages: list[Message]) -> None:
+    def _render_loaded_session_messages(
+        self,
+        messages: list[Message],
+        transcript: list[dict[str, str]] | None = None,
+    ) -> None:
+        if transcript:
+            self._render_loaded_transcript(transcript)
+            return
+
         chat = self.query_one("#chat-area", VerticalScroll)
         self._reset_chat_log_with_title()
         self._last_reply_text = ""
@@ -3247,6 +3931,40 @@ class AeroApp(App):
             chat.mount(Static(f"[dim]{t('app.session_empty_history', self.config.language)}[/dim]"))
         self._maybe_scroll_to_end()
 
+    def _render_loaded_transcript(self, transcript: list[dict[str, str]]) -> None:
+        """Rebuild the visible conversation without changing agent context."""
+        chat = self.query_one("#chat-area", VerticalScroll)
+        self._reset_chat_log_with_title()
+        self._last_reply_text = ""
+        pending_divider = False
+
+        for item in transcript:
+            role = item.get("role", "")
+            content = item.get("content", "")
+            if not content.strip():
+                continue
+            if role == "summary":
+                self._mount_compact_summary_block(content)
+                self._chat_log.append(f"[上下文压缩总结]\n{content}")
+                continue
+            if role == "user":
+                if pending_divider:
+                    chat.mount(Static("─", classes="divider"))
+                    pending_divider = False
+                self._mount_user_message_sync(content)
+                self._chat_log.append(f"你:\n{content}")
+                continue
+            if role == "assistant":
+                visible = _sanitize_user_facing_text(content)
+                self._mount_agent_message_sync(visible)
+                self._chat_log.append(f"Aero:\n{visible}")
+                self._last_reply_text = visible
+                pending_divider = True
+
+        if pending_divider:
+            chat.mount(Static("─", classes="divider"))
+        self._maybe_scroll_to_end()
+
     def _mount_user_message_sync(self, text: str) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
         row = Horizontal(classes="message-row user-message")
@@ -3259,7 +3977,7 @@ class AeroApp(App):
         )
         row.mount(Static(escape(text), classes="message-body user-content"))
 
-    def _mount_agent_message_sync(self, text: str) -> None:
+    def _mount_agent_message_sync(self, text: str, *, force_scroll: bool = False) -> None:
         chat = self.query_one("#chat-area", VerticalScroll)
         row = Horizontal(classes="message-row agent-message")
         chat.mount(row)
@@ -3271,7 +3989,13 @@ class AeroApp(App):
         )
         stack = Vertical(classes="message-body agent-stack")
         row.mount(stack)
-        stack.mount(ChatMarkdown(strip_image_markdown(text), classes="agent-content"))
+        stack.mount(
+            ChatMarkdown(
+                strip_image_markdown(text),
+                classes="agent-content",
+                force_scroll_on_ready=force_scroll,
+            )
+        )
         for path in self._resolve_inline_image_paths(text):
             try:
                 index = self._register_image_attachment(path)
@@ -3902,6 +4626,12 @@ class AeroApp(App):
             import uuid
             self._session_id = uuid.uuid4().hex[:12]
         set_session_id(self._session_id)
+        experiment = self._get_experiment_mgr().active()
+        workspace = (
+            self._get_experiment_mgr().workspace_path(experiment)
+            if experiment is not None
+            else self._project_dir
+        )
 
         async def safe_update(message: str) -> None:
             try:
@@ -3955,6 +4685,7 @@ class AeroApp(App):
                 return state.background_task is not None
 
             with (
+                use_workspace(self._project_dir, workspace),
                 use_subagent_launcher(self._launch_sub_agent_from_tool),
                 use_subagent_status_provider(self._query_sub_agents_from_tool),
                 use_subagent_canceller(self._cancel_sub_agent_from_tool),
@@ -4943,6 +5674,15 @@ def _command_suggestions(
     # discovering options such as `/checkpoints all` or `/session rename`.
     if prefix != "/":
         sources.extend(secondary)
+    deduplicated: list[tuple[str, str]] = []
+    seen_commands: set[str] = set()
+    for command, description in sources:
+        normalized = command.rstrip()
+        if normalized in seen_commands:
+            continue
+        seen_commands.add(normalized)
+        deduplicated.append((command, description))
+    sources = deduplicated
     matched = [(cmd, desc) for cmd, desc in sources if cmd.startswith(prefix)]
     if not matched:
         return []
@@ -5158,6 +5898,91 @@ def _session_title_from_messages(messages: list[Message], max_len: int = 24) -> 
     return ""
 
 
+def _checkpoint_title_from_messages(messages: list[Message], max_len: int = 18) -> str:
+    """Build a short deterministic fallback from the latest useful request."""
+    for message in reversed(messages):
+        if message.role != "user" or not message.content.strip():
+            continue
+        text = _clean_session_title_text(message.content)
+        if text and not _is_low_information_session_title(text):
+            return _truncate_session_title(text, max_len)
+    return ""
+
+
+def _checkpoint_title_prompt(messages: list[Message], language: str) -> str:
+    """Ask the model for a compact title describing the latest work state."""
+    transcript: list[str] = []
+    for message in messages:
+        if message.role not in {"user", "assistant"} or not message.content.strip():
+            continue
+        role = "用户" if message.role == "user" else "Aero"
+        content = _clean_session_title_prompt_text(message.content)
+        if content:
+            transcript.append(f"{role}: {content[:350]}")
+    context = "\n".join(transcript[-6:]) or "当前尚无有效对话内容"
+    if language == "zh":
+        return (
+            "请根据最近的工作内容，为当前检查点生成一个简短标题。\n"
+            "要求：概括当前完成的工作或阶段；6到16个中文字符；"
+            "不要使用‘检查点’三个字；不要加引号、句号或解释。\n\n"
+            f"{context}\n\n标题："
+        )
+    return (
+        "Create a short title for the current checkpoint from the latest work below.\n"
+        "Requirements: describe the completed work or current stage in 3 to 7 words; "
+        "do not use the word 'checkpoint'; no quotes, explanation, or trailing period.\n\n"
+        f"{context}\n\nTitle:"
+    )
+
+
+def _experiment_report_prompt(
+    experiment: dict, messages: list[Message], artifacts: list[str]
+) -> str:
+    transcript: list[str] = []
+    for message in messages:
+        if message.role not in {"user", "assistant"} or not message.content.strip():
+            continue
+        role = "用户" if message.role == "user" else "Aero"
+        content = message.content.strip()[:700]
+        transcript.append(f"{role}: {content}")
+    conversation = "\n".join(transcript[-20:]) or "无有效对话记录"
+    artifact_text = "\n".join(f"- {path}" for path in artifacts[:200]) or "- 无"
+    return (
+        f"请为实验“{experiment['name']}”撰写一份简洁、可独立阅读的 Markdown 实验报告。\n"
+        "必须包含：目标、方法与过程、关键结果、结论、局限或未解决问题、产物清单。"
+        "只能依据下面的对话和产物，不得编造结果；没有证据的内容明确写为未确认。"
+        "不要提及内部工具名，也不要添加报告之外的寒暄。\n\n"
+        f"实验对话：\n{conversation}\n\n产物：\n{artifact_text}"
+    )
+
+
+def _fallback_experiment_report(
+    experiment: dict, messages: list[Message], artifacts: list[str]
+) -> str:
+    latest_request = ""
+    for message in reversed(messages):
+        if message.role == "user" and message.content.strip():
+            latest_request = message.content.strip().splitlines()[0][:160]
+            break
+    artifact_lines = "\n".join(f"- `{path}`" for path in artifacts) or "- 无已记录产物"
+    return (
+        f"# 实验报告：{experiment['name']}\n\n"
+        "## 目标\n\n"
+        f"{latest_request or '当前对话中没有可提取的明确实验目标。'}\n\n"
+        "## 结果与结论\n\n"
+        "自动总结未能完成，请结合下列实验产物补充结论。\n\n"
+        f"## 产物\n\n{artifact_lines}\n\n"
+        "## 未解决问题\n\n- 实验结果尚需人工确认。"
+    )
+
+
+def _normalize_checkpoint_title(title: str) -> str:
+    """Normalize a generated title and remove generic checkpoint wording."""
+    title = _normalize_generated_session_title(title, max_len=18)
+    title = re.sub(r"检查点|checkpoint", "", title, flags=re.I)
+    return _normalize_generated_session_title(title, max_len=18)
+
+
 def _session_title_prompt(messages: list[Message], language: str) -> str:
     transcript = []
     seen_user = False
@@ -5284,8 +6109,13 @@ def _help_text(lang: str) -> str:
         t("help.slash_checkpoint_delete", lang),
         t("help.slash_checkpoint_rename", lang),
         t("help.slash_checkpoints", lang),
+        t("help.slash_checkpoints_clear", lang),
         t("help.slash_restore", lang),
         t("help.slash_experiment", lang),
+        t("help.slash_experiment_delete", lang),
+        t("help.slash_experiment_finish", lang),
+        t("help.slash_experiments", lang),
+        t("help.slash_experiments_clear", lang),
         t("help.slash_compact", lang),
         t("help.slash_set", lang),
         t("help.slash_revoke", lang),
@@ -5381,6 +6211,12 @@ def _format_checkpoint_diff(checkpoint: dict, diff) -> str:
     else:
         lines.append("该检查点只保存了数据清单，不能恢复文件。")
     return "\n".join(lines)
+
+
+def _format_checkpoint_list_entry(checkpoint: dict[str, Any]) -> str:
+    """Format a compact user-facing checkpoint list row."""
+    created = datetime.fromtimestamp(checkpoint["created_at"]).strftime("%Y-%m-%d %H:%M")
+    return f"- `{checkpoint['id']}` · **{checkpoint['name']}** · {created}"
 
 
 def _restore_confirmation_message(checkpoint: dict, diff) -> str:
@@ -5737,14 +6573,26 @@ def main():
     cmd = sys.argv[1]
 
     if cmd == "chat":
-        simple_mode = "--simple" in sys.argv or "--no-tui" in sys.argv
-        tui_mode = not simple_mode
+        chat_args = sys.argv[2:]
+        removed_modes = [arg for arg in chat_args if arg in {"--simple", "--no-tui"}]
+        if removed_modes:
+            print(
+                f"参数 {removed_modes[0]} 已移除；aero chat 现在只提供 Textual TUI 模式。"
+            )
+            sys.exit(2)
+        allowed_args = {"--mouse", "--no-mouse", "--continue", "-c"}
+        unknown_args = [arg for arg in chat_args if arg not in allowed_args]
+        if unknown_args:
+            print(f"未知参数: {unknown_args[0]}")
+            _print_usage()
+            sys.exit(2)
         mouse_mode = "--no-mouse" not in sys.argv
+        resume_last_session = "--continue" in sys.argv or "-c" in sys.argv
         debug_log(
             "cli.chat",
-            tui_mode=tui_mode,
-            simple_mode=simple_mode,
+            tui_mode=True,
             mouse_mode=mouse_mode,
+            resume_last_session=resume_last_session,
             debug_log_path=str(log_path),
             standard_log_path=str(standard_log_path),
         )
@@ -5756,13 +6604,8 @@ def main():
                 print("未完成模型配置，退出。")
                 sys.exit(1)
 
-        if tui_mode:
-            app = AeroApp(config)
-            app.run(mouse=mouse_mode)
-        else:
-            import asyncio
-
-            asyncio.run(_chat_simple(config))
+        app = AeroApp(config, resume_last_session=resume_last_session)
+        app.run(mouse=mouse_mode)
 
     elif cmd == "init":
         _init()
@@ -5783,7 +6626,7 @@ Aero — 气象科研 AI Agent IDE
 命令:
   aero init            初始化当前目录的配置与工作目录
   aero chat            启动 Textual TUI 对话（支持中文输入和流式输出）
-  aero chat --simple   启动纯文本对话
+  aero chat --continue 续接当前目录上一次保存的会话（短参数: -c）
   aero chat --mouse    启用 Textual 鼠标滚轮（默认已启用，保留兼容）
   aero chat --no-mouse 禁用 Textual 鼠标模式，交给终端原生选择/复制
   ↑/↓ 或 PageUp/PageDown  对话中滚动聊天区域
@@ -5801,292 +6644,6 @@ Aero — 气象科研 AI Agent IDE
 """)
 
 
-async def _chat_simple(config: AeroConfig):
-    from aero.agent.loop import AgentLoop
-    from aero.toolbox.builtin_tools import download_era5  # noqa: F401
-
-    loop = AgentLoop(config)
-    last_reply_text = ""
-
-    print("  Aero v0.1.0")
-    print(f"  模型: {config.llm.provider}/{config.llm.model}")
-    print(f"  强度: {config.llm.reasoning_effort or 'auto'}")
-    print(f"  工作目录: {Path.cwd()}")
-    print("  /quit 退出, /clear 清除上下文, /copy 复制最后回复")
-    print("  /provider 切换模型服务商, /model 切换模型, /variants 设置强度")
-    print("  /set max_tool_rounds N 设置工具轮次")
-    print("  /language zh|en 切换语言")
-    print()
-
-    try:
-        while True:
-            user_input = input("> ").strip()
-            if not user_input:
-                continue
-            if user_input == "/language" or user_input.startswith("/language "):
-                parts = user_input.split(maxsplit=1)
-                if len(parts) == 1:
-                    label = {"zh": "中文", "en": "English"}.get(config.language, config.language)
-                    print(
-                        f"当前语言: {label} ({config.language})。"
-                        "用法: /language zh 或 /language en"
-                    )
-                    continue
-                value = parts[1].strip()
-                if not is_supported_language(value):
-                    print(t("app.language_bad", value))
-                    continue
-                label = {"zh": "中文", "en": "English"}[value]
-                config.language = value
-                loop.reset_system_prompt(value)
-                _save_config(config)
-                print(f"语言已切换为 {label}")
-                continue
-            if user_input == "/quit":
-                print("再见!")
-                break
-            if user_input == "/clear":
-                loop.messages = [loop.messages[0]]
-                last_reply_text = ""
-                print("上下文已清除。")
-                continue
-            if user_input == "/copy":
-                if not last_reply_text.strip():
-                    print("暂无可复制的回复")
-                    continue
-                try:
-                    subprocess.run(
-                        ["pbcopy"],
-                        input=last_reply_text,
-                        text=True,
-                        check=True,
-                    )
-                    print("已复制最后一条回复")
-                except Exception as e:
-                    print(f"复制失败: {e}")
-                continue
-            if user_input == "/provider" or user_input.startswith("/provider "):
-                parts = user_input.split(maxsplit=1)
-                if len(parts) == 1:
-                    print(f"当前模型服务商: {_display_provider_name(config.llm.provider)}")
-                    print("内置服务商:")
-                    for provider_id, label in provider_options():
-                        print(f"  {provider_id:<12} {label}")
-                    print("用法: /provider deepseek 或 /provider kimi")
-                    continue
-                provider = normalize_provider_id(parts[1])
-                preset = get_provider_preset(provider)
-                if preset is None:
-                    print("未知模型服务商。请使用内置服务商，或在 aero.yaml 中自定义。")
-                    continue
-                previous_provider = config.llm.provider
-                config.llm.apply_active_provider_defaults()
-                config.llm.switch_provider(provider)
-                provider_config = config.llm.provider_config(provider)
-                if not provider_config.base_url:
-                    provider_config.base_url = preset.base_url
-                if not provider_config.model:
-                    provider_config.model = preset.default_model
-                config.llm.use_provider_settings()
-                loop.config.llm.provider = provider
-                loop.config.llm.base_url = config.llm.base_url
-                loop.config.llm.model = config.llm.model
-                loop.config.llm.set_active_api_key(config.llm.active_api_key())
-                loop.llm.config.provider = provider
-                loop.llm.config.base_url = config.llm.base_url
-                loop.llm.config.model = config.llm.model
-                loop.llm.config.api_key = config.llm.active_api_key()
-                _save_config(config)
-                print(f"模型服务已切换为 {preset.name}/{config.llm.model}")
-                if previous_provider != provider and not config.llm.active_api_key():
-                    print("当前服务商还没有 API key。")
-                    print(f"API key 获取入口: {preset.api_key_url}")
-                continue
-            llm_clear = _parse_llm_clear_from_text(user_input)
-            if llm_clear is not None:
-                _clear_llm_setup(config, reset_provider=llm_clear["reset_provider"])
-                loop.config.llm.provider = config.llm.provider
-                loop.config.llm.model = config.llm.model
-                loop.config.llm.providers = config.llm.providers
-                loop.config.llm.base_url = config.llm.base_url
-                loop.llm.config.provider = config.llm.provider
-                loop.llm.config.model = config.llm.model
-                loop.llm.config.api_key = config.llm.active_api_key()
-                loop.llm.config.base_url = config.llm.base_url
-                print(
-                    _llm_clear_success_message(
-                        config,
-                        reset_provider=llm_clear["reset_provider"],
-                    )
-                )
-                continue
-            llm_setup = _parse_llm_setup_from_text(user_input, config)
-            if llm_setup is not None:
-                if not llm_setup.get("api_key"):
-                    preset = get_provider_preset(llm_setup["provider"])
-                    if preset is None:
-                        print("请提供这个模型服务的 API key，或使用 /provider 选择内置服务商。")
-                    else:
-                        print(
-                            f"已识别为 {_display_provider_name(llm_setup['provider'])} "
-                            f"/ {llm_setup['model']}"
-                        )
-                        print(f"API key 获取入口: {preset.api_key_url}")
-                    continue
-                _apply_llm_setup(config, llm_setup)
-                loop.config.llm.provider = config.llm.provider
-                loop.config.llm.model = config.llm.model
-                loop.config.llm.providers = config.llm.providers
-                loop.config.llm.base_url = config.llm.base_url
-                loop.llm.config.provider = config.llm.provider
-                loop.llm.config.model = config.llm.model
-                loop.llm.config.api_key = config.llm.active_api_key()
-                loop.llm.config.base_url = config.llm.base_url
-                print(_llm_setup_success_message(config))
-                continue
-            if user_input == "/model" or user_input.startswith("/model "):
-                parts = user_input.split(maxsplit=1)
-                if len(parts) == 1:
-                    aliases = ", ".join(
-                        f"{k}={v}" for k, v in DEEPSEEK_MODEL_ALIASES.items()
-                    )
-                    print(f"当前模型: {config.llm.provider}/{config.llm.model}")
-                    print(f"DeepSeek 快捷名: {aliases}")
-                    print("用法: /model flash 或 /model deepseek-v4-pro")
-                    continue
-                model = _resolve_model_alias(config.llm.provider, parts[1])
-                if not model:
-                    print("模型名不能为空")
-                    continue
-                config.llm.model = model
-                loop.llm.config.model = model
-                _save_config(config)
-                print(f"模型已切换为 {config.llm.provider}/{model}")
-                continue
-            if (
-                user_input == "/variants"
-                or user_input.startswith("/variants ")
-                or user_input == "/effort"
-                or user_input.startswith("/effort ")
-            ):
-                parts = user_input.split(maxsplit=1)
-                if len(parts) == 1:
-                    print(
-                        f"当前推理强度: {config.llm.reasoning_effort or 'auto'}；"
-                        "用法: /variants low|medium|high|max|auto"
-                    )
-                    continue
-                effort = _normalize_reasoning_effort(parts[1])
-                if effort is None:
-                    print("推理强度可选: low / medium / high / max / auto")
-                    continue
-                config.llm.reasoning_effort = effort
-                loop.llm.config.reasoning_effort = effort
-                _save_config(config)
-                print(f"推理强度已设置为 {effort or 'auto'}")
-                continue
-            if user_input.startswith("/set "):
-                parts = user_input.split()
-                if len(parts) < 3:
-                    print("用法: /set max_tool_rounds 20 或 /set model flash")
-                    continue
-                if parts[1] == "model":
-                    model = _resolve_model_alias(config.llm.provider, parts[2])
-                    if not model:
-                        print("模型名不能为空")
-                        continue
-                    config.llm.model = model
-                    loop.llm.config.model = model
-                    _save_config(config)
-                    print(f"模型已切换为 {config.llm.provider}/{model}")
-                    continue
-                if parts[1] in ("variants", "effort", "reasoning_effort"):
-                    effort = _normalize_reasoning_effort(parts[2])
-                    if effort is None:
-                        print("推理强度可选: low / medium / high / max / auto")
-                        continue
-                    config.llm.reasoning_effort = effort
-                    loop.llm.config.reasoning_effort = effort
-                    _save_config(config)
-                    print(f"推理强度已设置为 {effort or 'auto'}")
-                    continue
-                if len(parts) != 3 or parts[1] != "max_tool_rounds":
-                    print("用法: /set max_tool_rounds 20")
-                    continue
-                try:
-                    value = int(parts[2])
-                except ValueError:
-                    print("max_tool_rounds 必须是整数")
-                    continue
-                if value < 1:
-                    print("max_tool_rounds 必须 >= 1")
-                    continue
-                loop.max_tool_rounds = value
-                from aero.toolbox.builtin_tools import set_max_tool_rounds
-                set_max_tool_rounds(value)
-                config.max_tool_rounds = value
-                _save_config(config)
-                print(f"max_tool_rounds 已设置为 {value}")
-                continue
-            if user_input == "/revoke" or user_input.startswith("/revoke "):
-                parts = user_input.split(maxsplit=1)
-                if len(parts) == 1:
-                    if not loop.always_allow:
-                        print("当前没有「一直允许」的工具")
-                    else:
-                        tools = ", ".join(sorted(loop.always_allow))
-                        print(f"一直允许的工具: {tools}")
-                        print("用法: /revoke <tool_name> 撤销")
-                else:
-                    tool_name = parts[1].strip()
-                    if tool_name in loop.always_allow:
-                        loop.always_allow.discard(tool_name)
-                        print(f"已撤销 {tool_name} 的「一直允许」")
-                    else:
-                        print(f"{tool_name} 不在「一直允许」列表中")
-                continue
-
-            if user_input == "/help" or user_input == "help":
-                print()
-                print("Aero 帮助")
-                print("─" * 40)
-                print()
-                print("斜杠命令:")
-                print("  /quit         退出")
-                print("  /clear        清除上下文")
-                print("  /help         显示帮助")
-                print("  /copy         复制上次回复")
-                print("  /model        查看/切换模型，如 /model flash")
-                print("  /variants     查看/设置推理强度: low/medium/high/max/auto")
-                print("  /set max_tool_rounds N  设置最大工具轮次 (默认 999)")
-                print("  /revoke       查看一直允许的工具")
-                print("  /revoke <t>   撤销一直允许")
-                print()
-                print("快捷键:")
-                print("  Ctrl+Q  退出")
-                print("  ↑/↓    滚动（仅 TUI）")
-                print()
-                continue
-
-            print()
-            response_text = ""
-            async for event in loop.run_stream(user_input):
-                if event.type == "text":
-                    response_text += event.content
-                    print(event.content, end="", flush=True)
-                elif event.type == "confirm":
-                    pass
-                elif event.type == "done":
-                    print()
-                    print("───")
-                    print()
-            if response_text:
-                last_reply_text = response_text
-
-    except KeyboardInterrupt:
-        print("\n再见!")
-    finally:
-        await loop.close()
 
 
 def _init():

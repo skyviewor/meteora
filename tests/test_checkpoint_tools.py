@@ -50,10 +50,14 @@ async def test_checkpoint_query_tools_use_current_directory(tmp_path, monkeypatc
     experiment = await start_checkpoint_experiment("trial")
 
     assert listed["checkpoints"][0]["id"] == checkpoint["id"]
-    assert listed["checkpoints"][0]["progress"] == "默认进度"
     assert "experiment" not in listed["checkpoints"][0]
+    assert "exact_restore" not in listed["checkpoints"][0]
     assert compared["modified"] == ["notes.md"]
     assert experiment["name"] == "trial"
+    workspace = tmp_path / experiment["workspace"]
+    assert workspace.is_dir()
+    for directory in ("scripts", "figures", "plans", "outputs", "reports", "data"):
+        assert (workspace / directory).is_dir()
 
 
 @pytest.mark.asyncio

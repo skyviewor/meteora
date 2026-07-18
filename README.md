@@ -66,7 +66,7 @@ aero chat
 |---|---|
 | `aero init` | 初始化当前目录的项目配置、工作目录和运行环境 |
 | `aero chat` | 启动 Textual TUI 对话（默认启用鼠标） |
-| `aero chat --simple` | 启动纯文本对话模式（`--no-tui` 为同义选项） |
+| `aero chat --continue` | 续接当前目录最近保存的 TUI 会话（短参数 `-c`） |
 | `aero chat --no-mouse` | 禁用 TUI 鼠标模式，使用终端原生选择与复制 |
 | `aero version` | 显示版本号 |
 | `aero help` | 显示命令帮助 |

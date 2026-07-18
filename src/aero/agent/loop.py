@@ -153,9 +153,9 @@ def _existing_mkdir_is_noop(command: str, workdir: str = ".") -> bool:
     if not parents or not targets:
         return False
 
-    from aero.toolbox.paths import find_project_dir
+    from aero.toolbox.paths import find_workspace_dir
 
-    project_dir = find_project_dir().resolve()
+    project_dir = find_workspace_dir().resolve()
     base = Path(workdir).expanduser()
     if not base.is_absolute():
         base = project_dir / base
@@ -866,6 +866,31 @@ def _ensure_cnmaps_when_sciplot_active(
         selected.append(SelectedSkill(skill=cnmaps, score=100))
 
 
+def _active_experiment_context() -> str:
+    """Describe the active experiment without exposing storage internals."""
+    try:
+        from aero.experiments import ExperimentManager
+        from aero.toolbox.paths import find_project_dir
+
+        manager = ExperimentManager(find_project_dir())
+        experiment = manager.active()
+        if experiment is None:
+            return ""
+        workspace = manager.workspace_path(experiment)
+        return (
+            f"当前实验：{experiment['name']}\n"
+            f"实验 ID：{experiment['id']}\n"
+            f"实验工作目录：{workspace}\n"
+            "相对文件路径和命令默认以该实验目录为根。脚本写入 scripts/，"
+            "图片写入 figures/，计划写入 plans/，其他中间产物写入 outputs/ 或 tmp/。\n"
+            "优先围绕当前实验目标工作，不要把脚本或中间产物写回项目公共目录；"
+            "只有用户明确要求共享或提升实验成果时才修改公共目录。"
+        )
+    except Exception as exc:
+        debug_log("agent.experiment_context_failed", error=str(exc))
+        return ""
+
+
 class AgentLoop:
     def __init__(self, config: AeroConfig):
         self.config = config
@@ -884,7 +909,12 @@ class AgentLoop:
 
         from aero.data.instructions import load_instructions
         instructions = load_instructions(project_dir=self.config.output.data_dir)
-        system = build_system_prompt(config, config.language, instructions_context=instructions)
+        system = build_system_prompt(
+            config,
+            config.language,
+            instructions_context=instructions,
+            experiment_context=_active_experiment_context(),
+        )
         self.messages: list[Message] = [
             Message(role="system", content=system),
         ]
@@ -900,7 +930,12 @@ class AgentLoop:
         self.config.language = language
         from aero.data.instructions import load_instructions
         instructions = load_instructions(project_dir=self.config.output.data_dir)
-        system = build_system_prompt(self.config, language, instructions_context=instructions)
+        system = build_system_prompt(
+            self.config,
+            language,
+            instructions_context=instructions,
+            experiment_context=_active_experiment_context(),
+        )
         self.messages[0] = Message(role="system", content=system)
 
     def _refresh_system_prompt_for_turn(self, user_message: str) -> None:
@@ -910,7 +945,11 @@ class AgentLoop:
         from aero.data.instructions import load_instructions
         instructions = load_instructions(project_dir=self.config.output.data_dir)
         system = build_system_prompt(
-            self.config, self.config.language, skill_context, instructions,
+            self.config,
+            self.config.language,
+            skill_context,
+            instructions,
+            experiment_context=_active_experiment_context(),
         )
         self.messages[0] = Message(role="system", content=system)
         if selected:
@@ -918,7 +957,6 @@ class AgentLoop:
                 "agent.skills_selected",
                 skills=[item.skill.name for item in selected],
             )
-
     def _allowed_tools(self) -> list[dict]:
         from aero.data.modes import filter_tool_functions
         return filter_tool_functions(self.registry.list_functions(), self.config.mode)

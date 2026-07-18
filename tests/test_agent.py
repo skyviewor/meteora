@@ -22,13 +22,22 @@ def test_session_save_load(tmp_path):
         ),
         Message(role="tool", content='{"result":"ok"}', tool_call_id="c1"),
     ]
-    sm.save("test-session", messages, SessionMeta(name="测试会话", title_source="auto"))
+    sm.save(
+        "test-session",
+        messages,
+        SessionMeta(
+            name="测试会话",
+            title_source="auto",
+            project_dir=str(tmp_path),
+        ),
+    )
     loaded = sm.load("test-session")
     assert loaded is not None
     loaded_messages, meta = loaded
     assert meta.id == "test-session"
     assert meta.name == "测试会话"
     assert meta.title_source == "auto"
+    assert meta.project_dir == str(tmp_path)
     assert meta.message_count == len(messages)
     assert len(loaded_messages) == 4
     assert loaded_messages[0].role == "system"
@@ -95,6 +104,39 @@ def test_session_list(tmp_path):
     sessions = sm.list_sessions()
     assert len(sessions) == 2
     assert {s.id for s in sessions} == {"s1", "s2"}
+
+
+def test_latest_session_is_scoped_to_launch_directory(tmp_path):
+    from aero.agent.session import SessionMeta
+
+    sm = SessionManager(tmp_path / "sessions")
+    project_a = tmp_path / "a"
+    project_b = tmp_path / "b"
+    project_a.mkdir()
+    project_b.mkdir()
+    sm.save(
+        "a-session",
+        [Message(role="user", content="a")],
+        SessionMeta(project_dir=str(project_a)),
+    )
+    sm.save(
+        "b-session",
+        [Message(role="user", content="b")],
+        SessionMeta(project_dir=str(project_b)),
+    )
+
+    assert sm.latest_session(project_a).id == "a-session"
+    assert sm.latest_session(project_b).id == "b-session"
+
+
+def test_latest_session_falls_back_to_legacy_unscoped_session(tmp_path):
+    sm = SessionManager(tmp_path / "sessions")
+    project = tmp_path / "project"
+    project.mkdir()
+    sm.save("legacy", [Message(role="user", content="legacy")])
+
+    assert sm.latest_session(project).id == "legacy"
+    assert sm.latest_session(project, include_legacy=False) is None
 
 
 def test_session_encrypted_snapshot_round_trip(tmp_path):

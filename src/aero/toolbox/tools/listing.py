@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from aero.toolbox.download_progress import format_size
-from aero.toolbox.paths import find_project_dir, resolve_project_path, short_path
+from aero.toolbox.paths import find_workspace_dir, resolve_project_path, short_path
 from aero.toolbox.registry import register_tool
 
 
@@ -77,7 +77,7 @@ _FIGURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg"}
 )
 async def list_figures() -> dict:
     """List image files from the project figures directory only."""
-    project_dir = find_project_dir()
+    project_dir = find_workspace_dir()
     figures_dir = project_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
 
