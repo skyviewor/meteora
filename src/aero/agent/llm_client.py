@@ -4,9 +4,9 @@ Supports DeepSeek, OpenAI, Ollama, and any OpenAI-compatible endpoint.
 Includes both non-streaming and streaming (SSE) chat.
 """
 
+import asyncio
 import json
 import re
-import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 
@@ -29,10 +29,25 @@ _TRANSIENT_HTTP_ERRORS = (
 )
 
 
+def _first_choice(response: dict) -> dict:
+    """Return the first valid choice, tolerating usage-only API responses."""
+    choices = response.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return {}
+    choice = choices[0]
+    return choice if isinstance(choice, dict) else {}
+
+
 class StreamEvent:
     """A single event from a streaming LLM response."""
 
-    def __init__(self, type: str, content: str = "", tool_call: ToolCall | None = None, usage: dict | None = None):
+    def __init__(
+        self,
+        type: str,
+        content: str = "",
+        tool_call: ToolCall | None = None,
+        usage: dict | None = None,
+    ):
         self.type = type  # "text" | "tool_call" | "done"
         self.content = content
         self.tool_call = tool_call
@@ -80,7 +95,7 @@ class LLMClient:
         """Send messages to LLM and return text response."""
         response = await self._send(messages, tools=None)
         self.last_usage = response.get("usage")
-        choice = response.get("choices", [{}])[0]
+        choice = _first_choice(response)
         return choice.get("message", {}).get("content", "")
 
     async def chat_stream(self, messages: list[Message]) -> AsyncGenerator[StreamEvent, None]:
@@ -110,7 +125,7 @@ class LLMClient:
                             data = json.loads(data_str)
                             if "usage" in data:
                                 captured_usage = data["usage"]
-                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            delta = _first_choice(data).get("delta", {})
                             content = delta.get("content", "")
                             if content:
                                 emitted = True
@@ -132,7 +147,7 @@ class LLMClient:
         """Send messages to LLM with tool definitions, return text + tool calls."""
         response = await self._send(messages, tools=tools)
         self.last_usage = response.get("usage")
-        choice = response.get("choices", [{}])[0]
+        choice = _first_choice(response)
         msg = choice.get("message", {})
 
         text = msg.get("content") or ""
@@ -180,7 +195,9 @@ class LLMClient:
                         data_str = line.removeprefix("data: ")
                         if data_str == "[DONE]":
                             self.last_usage = captured_usage
-                            content_text, content_tool_calls = _parse_content_tool_calls(content_buffer)
+                            content_text, content_tool_calls = _parse_content_tool_calls(
+                                content_buffer
+                            )
                             if len(content_text) > content_sent:
                                 emitted = True
                                 yield StreamEvent(
@@ -213,7 +230,7 @@ class LLMClient:
                             data = json.loads(data_str)
                             if "usage" in data:
                                 captured_usage = data["usage"]
-                            delta = data.get("choices", [{}])[0].get("delta", {})
+                            delta = _first_choice(data).get("delta", {})
                         except json.JSONDecodeError:
                             continue
 
@@ -360,7 +377,8 @@ def _raise_for_status(response: httpx.Response) -> None:
             if "Content Exists Risk" in body:
                 raise RuntimeError(
                     "当前对话内容被模型服务商的安全策略拦截（Content Exists Risk）。\n"
-                    "建议换一种表述方式重试，或使用 /provider 切换到其他服务商（如阿里云百炼、Kimi）。"
+                    "建议换一种表述方式重试，或使用 /provider 切换到其他服务商"
+                    "（如阿里云百炼、Kimi）。"
                 ) from e
             if "content_filter" in body.lower() or "safety" in body.lower():
                 raise RuntimeError(

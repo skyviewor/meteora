@@ -91,7 +91,7 @@ from aero.toolbox.tools.checkpoints import (
 )
 
 
-from aero.toolbox.tools.documents import preview_image, read_pdf
+from aero.toolbox.tools.documents import preview_image, preview_pdf, read_pdf
 
 
 from aero.toolbox.tools.email import (
@@ -148,6 +148,23 @@ from aero.toolbox.tools.instructions import (
     record_instruction,
     show_instructions,
 )
+from aero.toolbox.tools.memos import (
+    clear_memos,
+    delete_memo,
+    record_memo,
+    show_memos,
+    update_memo,
+)
+from aero.toolbox.tools.paper_versions import (
+    diff_paper_version,
+    initialize_paper_versioning,
+    list_paper_versions,
+    paper_version_status,
+    restore_paper_version,
+    save_paper_version,
+)
+from aero.toolbox.tools.paper_export import export_paper
+from aero.toolbox.tools.web_search import search_web
 from aero.toolbox.tools.subagents import cancel_sub_agent, launch_sub_agent, query_sub_agents
 from aero.toolbox.tools.tool_rounds import get_max_tool_rounds, set_max_tool_rounds
 
@@ -157,6 +174,7 @@ __all__ = [
     "check_cds_config",
     "check_earthdata_config",
     "clear_instructions",
+    "clear_memos",
     "clear_ads_config",
     "clear_cds_config",
     "clear_earthdata_config",
@@ -187,8 +205,11 @@ __all__ = [
     "scan_local_files",
     "search_dataset_variables",
     "delete_file",
+    "delete_memo",
+    "diff_paper_version",
     "download_literature_pdf",
     "edit_file",
+    "export_paper",
     "get_gefs_forecast_schedule",
     "get_cams_latest_forecast_cycle",
     "get_gfs_forecast_schedule",
@@ -198,6 +219,7 @@ __all__ = [
     "inspect_csv_table",
     "inspect_gfs_inventory",
     "inspect_grib2",
+    "initialize_paper_versioning",
     "list_downloads",
     "list_checkpoints",
     "launch_sub_agent",
@@ -205,18 +227,24 @@ __all__ = [
     "list_figures",
     "list_files",
     "list_literature",
+    "list_paper_versions",
     "lookup_gefs_parameter",
     "lookup_ecmwf_parameter",
     "lookup_gfs_parameter",
     "propose_execution",
     "rename_checkpoint",
     "preview_image",
+    "preview_pdf",
     "parse_isd_csv",
+    "paper_version_status",
     "query_sub_agents",
     "query_download",
     "read_file",
     "read_pdf",
     "record_instruction",
+    "record_memo",
+    "restore_paper_version",
+    "save_paper_version",
     "save_literature",
     "search_cds_variables",
     "search_cams_variables",
@@ -225,9 +253,12 @@ __all__ = [
     "search_gfs_variables",
     "search_ifs_variables",
     "search_literature",
+    "search_web",
     "send_email",
     "set_max_tool_rounds",
     "show_instructions",
+    "show_memos",
+    "update_memo",
     "start_checkpoint_experiment",
     "subset_netcdf",
     "retry_download",

@@ -80,6 +80,24 @@ _BUILD_TOOLS: set[str] = {
 }
 
 
+def _destructive_memo_tools_for_text(text: str) -> set[str]:
+    """Expose destructive memo tools only for an explicit current-turn request."""
+    lowered = str(text or "").lower()
+    if not any(marker in lowered for marker in ("备忘录", "备忘", "memo")):
+        return set()
+    clear_requested = any(
+        marker in lowered
+        for marker in ("清空", "清理全部", "删除全部", "删除所有", "clear all", "clear memos")
+    )
+    if clear_requested:
+        return {"clear_memos"}
+    delete_requested = any(
+        marker in lowered
+        for marker in ("删除", "删掉", "移除", "delete", "remove")
+    )
+    return {"delete_memo"} if delete_requested else set()
+
+
 def _without_heredoc_bodies(command: str) -> str:
     lines = command.splitlines()
     visible: list[str] = []
@@ -282,11 +300,13 @@ _TOOL_NAME_REPLACEMENTS = {
     "analyze_image": "分析图片",
     "configure_vision_model": "配置视觉模型",
     "search_literature": "检索学术文献",
+    "search_web": "搜索互联网",
     "save_literature": "保存文献信息",
     "download_literature_pdf": "下载文献全文",
     "list_literature": "查看文献列表",
     "read_pdf": "提取 PDF 文本",
     "preview_image": "打开图片预览",
+    "preview_pdf": "打开 PDF",
     "get_max_tool_rounds": "查询工具轮次上限",
     "set_max_tool_rounds": "设置工具轮次上限",
     "launch_sub_agent": "转交后台任务",
@@ -295,6 +315,18 @@ _TOOL_NAME_REPLACEMENTS = {
     "record_instruction": "记录个性化指令",
     "show_instructions": "查看已有指令",
     "clear_instructions": "清空指令记录",
+    "record_memo": "加入研究备忘录",
+    "show_memos": "查看研究备忘录",
+    "update_memo": "更新研究备忘录",
+    "delete_memo": "删除研究备忘录",
+    "clear_memos": "清理研究备忘录",
+    "initialize_paper_versioning": "启用论文版本管理",
+    "paper_version_status": "查看论文版本状态",
+    "save_paper_version": "保存论文版本",
+    "list_paper_versions": "查看论文版本历史",
+    "diff_paper_version": "比较论文版本",
+    "restore_paper_version": "恢复论文版本",
+    "export_paper": "导出论文",
     "write_plan_document": "保存计划书",
     "propose_execution": "确认执行",
 }
@@ -458,11 +490,13 @@ _TOOL_PROGRESS_MESSAGES = {
     "analyze_image": ("正在调用视觉模型分析图片", "图片分析完成", "图片分析失败"),
     "configure_vision_model": ("正在配置视觉模型", "视觉模型配置完成", "视觉模型配置失败"),
     "search_literature": ("正在检索学术文献", "学术文献检索完成", "学术文献检索失败"),
+    "search_web": ("正在搜索互联网", "互联网搜索完成", "互联网搜索失败"),
     "save_literature": ("正在保存文献信息", "文献信息保存完成", "文献信息保存失败"),
     "download_literature_pdf": ("正在下载文献全文", "文献全文下载完成", "文献全文下载失败"),
     "list_literature": ("正在查看文献列表", "文献列表查看完成", "查看文献列表失败"),
     "read_pdf": ("正在提取 PDF 文本内容", "PDF 文本提取完成", "PDF 文本提取失败"),
     "preview_image": ("正在打开图片", "图片预览已打开", "打开图片失败"),
+    "preview_pdf": ("正在打开 PDF", "PDF 已打开", "打开 PDF 失败"),
     "launch_sub_agent": ("正在转交后台任务", "后台任务已启动", "后台任务转交失败"),
     "query_sub_agents": (
         "正在查询后台任务状态",
@@ -473,6 +507,30 @@ _TOOL_PROGRESS_MESSAGES = {
     "record_instruction": ("正在记录个性化指令", "个性化指令已记录", "记录指令失败"),
     "show_instructions": ("正在查看已有指令", "已有指令查看完成", "查看指令失败"),
     "clear_instructions": ("正在清空指令记录", "指令记录已清空", "清空指令失败"),
+    "record_memo": ("正在准备研究备忘录", "研究备忘录已记录", "记录备忘录失败"),
+    "show_memos": ("正在查看研究备忘录", "研究备忘录查看完成", "查看备忘录失败"),
+    "update_memo": ("正在准备更新研究备忘录", "研究备忘录已更新", "更新备忘录失败"),
+    "delete_memo": ("正在删除研究备忘录", "研究备忘录已删除", "删除备忘录失败"),
+    "clear_memos": ("正在清理研究备忘录", "研究备忘录已清理", "清理备忘录失败"),
+    "initialize_paper_versioning": (
+        "正在启用论文版本管理",
+        "论文版本管理已启用",
+        "启用论文版本管理失败",
+    ),
+    "paper_version_status": (
+        "正在查看论文版本状态",
+        "论文版本状态查看完成",
+        "查看论文版本状态失败",
+    ),
+    "save_paper_version": ("正在保存论文版本", "论文版本已保存", "保存论文版本失败"),
+    "list_paper_versions": (
+        "正在查看论文版本历史",
+        "论文版本历史查看完成",
+        "查看论文版本历史失败",
+    ),
+    "diff_paper_version": ("正在比较论文版本", "论文版本比较完成", "比较论文版本失败"),
+    "restore_paper_version": ("正在恢复论文版本", "论文版本已恢复", "恢复论文版本失败"),
+    "export_paper": ("正在转换论文格式", "论文文件已生成", "论文格式转换失败"),
     "write_plan_document": ("正在保存计划书", "计划书已保存", "计划书保存失败"),
 }
 
@@ -891,6 +949,18 @@ def _active_experiment_context() -> str:
         return ""
 
 
+def _project_memo_context() -> str:
+    """Load research findings for summaries and writing tasks."""
+    try:
+        from aero.data.memos import render_memo_context
+        from aero.toolbox.paths import find_project_dir
+
+        return render_memo_context(find_project_dir())
+    except Exception as exc:
+        debug_log("agent.memo_context_failed", error=str(exc))
+        return ""
+
+
 class AgentLoop:
     def __init__(self, config: AeroConfig):
         self.config = config
@@ -914,6 +984,7 @@ class AgentLoop:
             config.language,
             instructions_context=instructions,
             experiment_context=_active_experiment_context(),
+            memo_context=_project_memo_context(),
         )
         self.messages: list[Message] = [
             Message(role="system", content=system),
@@ -924,6 +995,7 @@ class AgentLoop:
         self.confirm_future: asyncio.Future[str] | None = None
         self._ref_urls: list[str] = []
         self._direct_response: str | None = None
+        self._current_user_message = ""
         self.tracker = TokenTracker()
 
     def reset_system_prompt(self, language: str) -> None:
@@ -935,6 +1007,7 @@ class AgentLoop:
             language,
             instructions_context=instructions,
             experiment_context=_active_experiment_context(),
+            memo_context=_project_memo_context(),
         )
         self.messages[0] = Message(role="system", content=system)
 
@@ -950,6 +1023,7 @@ class AgentLoop:
             skill_context,
             instructions,
             experiment_context=_active_experiment_context(),
+            memo_context=_project_memo_context(),
         )
         self.messages[0] = Message(role="system", content=system)
         if selected:
@@ -959,7 +1033,16 @@ class AgentLoop:
             )
     def _allowed_tools(self) -> list[dict]:
         from aero.data.modes import filter_tool_functions
-        return filter_tool_functions(self.registry.list_functions(), self.config.mode)
+        tools = filter_tool_functions(self.registry.list_functions(), self.config.mode)
+        allowed_destructive_memo_tools = _destructive_memo_tools_for_text(
+            self._current_user_message
+        )
+        return [
+            tool
+            for tool in tools
+            if tool.get("function", {}).get("name")
+            not in ({"delete_memo", "clear_memos"} - allowed_destructive_memo_tools)
+        ]
 
     async def close(self):
         await self.llm.close()
@@ -969,6 +1052,7 @@ class AgentLoop:
         debug_log("agent.run_started", mode="non_stream", text_length=len(user_message))
         self._ref_urls.clear()
         self._direct_response = None
+        self._current_user_message = user_message
         self._drop_incomplete_tool_call_tail()
         self.messages = _sanitize_tool_message_sequence(self.messages)
         self._refresh_system_prompt_for_turn(user_message)
@@ -1015,6 +1099,7 @@ class AgentLoop:
         self._cancel_event = asyncio.Event()
         self._ref_urls.clear()
         self._direct_response = None
+        self._current_user_message = user_message
         self._drop_incomplete_tool_call_tail()
         self.messages = _sanitize_tool_message_sequence(self.messages)
         self._refresh_system_prompt_for_turn(user_message)
@@ -1299,6 +1384,19 @@ class AgentLoop:
 
         for tool_name, calls in groups.items():
             debug_log("agent.tool_group_started", tool_name=tool_name, calls=len(calls))
+            if (
+                tool_name in {"delete_memo", "clear_memos"}
+                and tool_name
+                not in _destructive_memo_tools_for_text(self._current_user_message)
+            ):
+                err = "用户本轮没有明确要求删除备忘录，本次删除操作已阻止。"
+                debug_log("agent.memo_delete_blocked", tool_name=tool_name)
+                for tc in calls:
+                    yield StreamEvent(type="status", content=err)
+                    self.messages.append(
+                        Message(role="tool", content=err, tool_call_id=tc.id)
+                    )
+                continue
             spec = self.registry.get(tool_name)
             if spec is None:
                 err = f"当前操作不可用：{_sanitize_user_facing_text(tool_name)}"
@@ -1638,13 +1736,27 @@ def _tool_start_message(tool_name: str) -> str:
         "list_figures": "正在查看图片列表...",
         "delete_file": "正在删除文件...",
         "search_literature": "正在检索学术文献...",
+        "search_web": "正在搜索互联网...",
         "save_literature": "正在保存文献信息...",
         "download_literature_pdf": "正在下载文献全文...",
         "list_literature": "正在查看已保存文献...",
         "read_pdf": "正在提取 PDF 文本内容...",
+        "preview_pdf": "正在打开 PDF...",
         "record_instruction": "正在记录个性化指令...",
         "show_instructions": "正在查看已有指令...",
         "clear_instructions": "正在清空指令记录...",
+        "record_memo": "正在准备研究备忘录...",
+        "show_memos": "正在查看研究备忘录...",
+        "update_memo": "正在准备更新研究备忘录...",
+        "delete_memo": "正在删除研究备忘录...",
+        "clear_memos": "正在清理研究备忘录...",
+        "initialize_paper_versioning": "正在启用论文版本管理...",
+        "paper_version_status": "正在查看论文版本状态...",
+        "save_paper_version": "正在保存论文版本...",
+        "list_paper_versions": "正在查看论文版本历史...",
+        "diff_paper_version": "正在比较论文版本...",
+        "restore_paper_version": "正在恢复论文版本...",
+        "export_paper": "正在转换论文格式...",
         "write_plan_document": "正在保存计划书...",
     }
     return messages.get(tool_name, "正在处理请求...")
@@ -1687,13 +1799,27 @@ def _tool_done_message(tool_name: str) -> str:
         "list_figures": "图片列表读取完成",
         "delete_file": "文件删除完成",
         "search_literature": "学术文献检索完成",
+        "search_web": "互联网搜索完成",
         "save_literature": "文献信息保存完成",
         "download_literature_pdf": "文献全文下载完成",
         "list_literature": "已保存文献列表读取完成",
         "read_pdf": "PDF 文本内容提取完成",
+        "preview_pdf": "PDF 已打开",
         "record_instruction": "个性化指令已记录",
         "show_instructions": "已有指令查看完成",
         "clear_instructions": "指令记录已清空",
+        "record_memo": "研究备忘录已记录",
+        "show_memos": "研究备忘录查看完成",
+        "update_memo": "研究备忘录已更新",
+        "delete_memo": "研究备忘录已删除",
+        "clear_memos": "研究备忘录已清理",
+        "initialize_paper_versioning": "论文版本管理已启用",
+        "paper_version_status": "论文版本状态查看完成",
+        "save_paper_version": "论文版本已保存",
+        "list_paper_versions": "论文版本历史查看完成",
+        "diff_paper_version": "论文版本比较完成",
+        "restore_paper_version": "论文版本已恢复",
+        "export_paper": "论文文件已生成",
         "write_plan_document": "计划书已保存",
     }
     return messages.get(tool_name, "处理完成")
@@ -1736,13 +1862,27 @@ def _tool_error_prefix(tool_name: str) -> str:
         "list_figures": "图片列表读取失败",
         "delete_file": "文件删除失败",
         "search_literature": "学术文献检索失败",
+        "search_web": "互联网搜索失败",
         "save_literature": "文献信息保存失败",
         "download_literature_pdf": "文献全文下载失败",
         "list_literature": "已保存文献列表读取失败",
         "read_pdf": "PDF 文本内容提取失败",
+        "preview_pdf": "打开 PDF 失败",
         "record_instruction": "记录指令失败",
         "show_instructions": "查看指令失败",
         "clear_instructions": "清空指令失败",
+        "record_memo": "记录备忘录失败",
+        "show_memos": "查看备忘录失败",
+        "update_memo": "更新备忘录失败",
+        "delete_memo": "删除备忘录失败",
+        "clear_memos": "清理备忘录失败",
+        "initialize_paper_versioning": "启用论文版本管理失败",
+        "paper_version_status": "查看论文版本状态失败",
+        "save_paper_version": "保存论文版本失败",
+        "list_paper_versions": "查看论文版本历史失败",
+        "diff_paper_version": "比较论文版本失败",
+        "restore_paper_version": "恢复论文版本失败",
+        "export_paper": "论文格式转换失败",
         "write_plan_document": "计划书保存失败",
     }
     return messages.get(tool_name, "处理失败")

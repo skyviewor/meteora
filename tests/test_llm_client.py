@@ -301,3 +301,57 @@ async def test_llm_stream_retries_before_any_content():
     assert [event.type for event in events] == ["text", "done"]
     assert events[0].content == "恢复了"
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_llm_stream_ignores_usage_only_chunk_with_empty_choices():
+    from unittest.mock import patch
+
+    class FakeStreamResponse:
+        is_error = False
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            yield 'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}'
+            yield 'data: {"choices":[{"delta":{"content":"正常回复"}}]}'
+            yield "data: [DONE]"
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = LLMClient(LLMConfig(api_key="sk-test"))
+    with patch.object(client._client, "stream", return_value=FakeStream()):
+        events = [
+            event
+            async for event in client.chat_with_tools_stream(
+                [Message(role="user", content="Hi")],
+                tools=[],
+            )
+        ]
+
+    assert [event.type for event in events] == ["text", "done"]
+    assert events[0].content == "正常回复"
+    assert events[-1].usage == {"prompt_tokens": 3, "completion_tokens": 2}
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_empty_choices_returns_empty_text():
+    from unittest.mock import AsyncMock, patch
+
+    client = LLMClient(LLMConfig(api_key="sk-test"))
+    with patch.object(client, "_send", new_callable=AsyncMock) as mock_send:
+        mock_send.return_value = {"choices": [], "usage": {"prompt_tokens": 1}}
+        assert await client.chat([Message(role="user", content="Hi")]) == ""
+
+    await client.close()

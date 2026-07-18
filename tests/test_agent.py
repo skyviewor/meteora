@@ -45,6 +45,34 @@ def test_session_save_load(tmp_path):
     assert loaded_messages[3].tool_call_id == "c1"
 
 
+def test_session_redacts_api_keys_from_messages_and_tool_calls(tmp_path):
+    sm = SessionManager(tmp_path)
+    secret = "sk-sensitive-session-value"
+    messages = [
+        Message(role="user", content=f"视觉模型 API key: {secret}"),
+        Message(
+            role="assistant",
+            content="正在配置",
+            tool_calls=[
+                ToolCall(
+                    id="c1",
+                    name="configure_provider",
+                    arguments={"api_key": secret, "model": "qwen-plus"},
+                )
+            ],
+        ),
+    ]
+
+    sm.save("secret-session", messages)
+    loaded = sm.load("secret-session")
+
+    assert loaded is not None
+    restored, _ = loaded
+    assert secret not in restored[0].content
+    assert "[API_KEY_REDACTED]" in restored[0].content
+    assert restored[1].tool_calls[0].arguments["api_key"] == "[API_KEY_REDACTED]"
+
+
 def test_sanitize_tool_message_sequence_drops_orphan_tool_messages():
     from aero.agent.loop import _sanitize_tool_message_sequence
 
@@ -205,6 +233,8 @@ def test_build_system_prompt():
     assert "生成图或改图后必须把图片嵌入对话框" in prompt
     assert "只要用户明确说“打开图片 / 打开这张图 / 帮我打开图”等自然表达" in prompt
     assert "但即使调用了 `preview_image`" in prompt
+    assert "用户明确说“打开 PDF / 把这篇论文打开 / 把文件打开”" in prompt
+    assert "不要只打印路径，也不要声称没有打开 PDF 的能力" in prompt
     assert "不要用 run_shell/curl/head/grep 查看 ADS 网页" in prompt
     assert "必须先调用 get_cams_latest_forecast_cycle" in prompt
     assert "不要自己写 cdsapi/urllib/requests 下载脚本" in prompt
@@ -258,6 +288,7 @@ def test_build_system_prompt_prefers_tools_in_english():
     assert "generated or revised figures must appear inline in the chat via Markdown image syntax" in prompt
     assert "Never omit the inline image" in prompt
     assert "Call `preview_image` when the user explicitly asks to open the image" in prompt
+    assert "When the user explicitly asks to open a local PDF or paper" in prompt
     assert "do not inspect ADS\n    pages with run_shell/curl/head/grep" in prompt
     assert "do not write your own cdsapi/urllib/requests\n    downloader" in prompt
     assert "figures/precip_2023.png" in prompt

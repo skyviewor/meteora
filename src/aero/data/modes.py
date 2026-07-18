@@ -42,6 +42,12 @@ BLOCKED_IN_PLAN: set[str] = {
     "download_dataset",
     "save_literature",
     "launch_sub_agent",
+    "delete_memo",
+    "clear_memos",
+    "initialize_paper_versioning",
+    "save_paper_version",
+    "restore_paper_version",
+    "export_paper",
 }
 
 BLOCKED_IN_QA: set[str] = {

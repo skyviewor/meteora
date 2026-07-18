@@ -80,6 +80,7 @@ from aero.core.config import (
     AeroConfig,
     clear_llm_api_key,
     save_llm_profile,
+    save_vision_api_key,
 )
 from aero.core.debug_log import configure_debug_logging, debug_log
 from aero.core.llm_providers import (
@@ -93,6 +94,8 @@ from aero.data.plans import set_session_id
 from aero.data.pricing import TokenTracker, context_window_for, format_cost, format_token_count
 from aero.core.types import Message
 from aero.i18n import is_supported_language, language_label, language_options, t
+from aero.paper_versions import PaperVersionManager
+from aero.paper_export import PaperExportError, export_paper
 from aero.toolbox.paths import use_workspace
 
 DEEPSEEK_MODEL_ALIASES = {
@@ -113,6 +116,11 @@ _CONFIRM_ACTION_LABELS = {
     "delete_file": "删除文件",
     "run_shell": "执行 Shell 命令",
     "ensure_runtime_tools": "安装命令行工具",
+    "record_memo": "加入研究备忘录",
+    "update_memo": "更新研究备忘录",
+    "delete_memo": "删除研究备忘录",
+    "clear_memos": "清理研究备忘录",
+    "restore_paper_version": "恢复论文版本",
 }
 
 
@@ -366,6 +374,12 @@ class ConfirmScreen(ModalScreen[str]):
         Binding("tab", "focus_next", "右移", show=False, priority=True),
         Binding("left", "focus_previous", "左移", show=False, priority=True),
         Binding("right", "focus_next", "右移", show=False, priority=True),
+        Binding("up", "scroll_message_up", "上滚", show=False, priority=True),
+        Binding("down", "scroll_message_down", "下滚", show=False, priority=True),
+        Binding("pageup", "scroll_message_page_up", "向上翻页", show=False, priority=True),
+        Binding("pagedown", "scroll_message_page_down", "向下翻页", show=False, priority=True),
+        Binding("home", "scroll_message_home", "滚到顶部", show=False, priority=True),
+        Binding("end", "scroll_message_end", "滚到底部", show=False, priority=True),
         Binding("enter", "confirm_selected", "确认", show=False, priority=True),
         Binding("space", "confirm_selected", "确认", show=False, priority=True),
     ]
@@ -414,6 +428,20 @@ class ConfirmScreen(ModalScreen[str]):
                 yield Static(t("confirm.shortcuts", self._lang), id="confirm-shortcuts")
 
     def on_key(self, event: events.Key) -> None:
+        scroll_actions = {
+            "up": self.action_scroll_message_up,
+            "down": self.action_scroll_message_down,
+            "pageup": self.action_scroll_message_page_up,
+            "pagedown": self.action_scroll_message_page_down,
+            "home": self.action_scroll_message_home,
+            "end": self.action_scroll_message_end,
+        }
+        scroll_action = scroll_actions.get(event.key)
+        if scroll_action is not None:
+            event.stop()
+            event.prevent_default()
+            scroll_action()
+            return
         if event.key == "left":
             event.stop()
             event.prevent_default()
@@ -458,6 +486,27 @@ class ConfirmScreen(ModalScreen[str]):
 
     def action_confirm_selected(self) -> None:
         self._confirm_selected_button()
+
+    def action_scroll_message_up(self) -> None:
+        self._message_box().scroll_up(animate=False)
+
+    def action_scroll_message_down(self) -> None:
+        self._message_box().scroll_down(animate=False)
+
+    def action_scroll_message_page_up(self) -> None:
+        self._message_box().scroll_page_up(animate=False)
+
+    def action_scroll_message_page_down(self) -> None:
+        self._message_box().scroll_page_down(animate=False)
+
+    def action_scroll_message_home(self) -> None:
+        self._message_box().scroll_home(animate=False)
+
+    def action_scroll_message_end(self) -> None:
+        self._message_box().scroll_end(animate=False)
+
+    def _message_box(self) -> VerticalScroll:
+        return self.query_one("#confirm-message-box", VerticalScroll)
 
     def _move_button_focus(self, delta: int) -> None:
         self._selected_button = (self._selected_button + delta) % len(self._button_ids)
@@ -1388,6 +1437,7 @@ class AeroApp(App):
         self._last_escape_at = 0.0
         self._last_reply_text: str = ""
         self._chat_log: list[str] = []
+        self._pending_llm_setup: dict | None = None
         self._filtered_commands: list[tuple[str, str]] = []
         self._cmd_list: ListView | None = None
         self._model_info: Static | None = None
@@ -2081,6 +2131,11 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
+        if text == "/paper" or text.startswith("/paper "):
+            await self._handle_paper_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
         if text == "/experiment" or text.startswith("/experiment "):
             await self._handle_experiment_command(text)
             self.query_one("#user-input", TextArea).focus()
@@ -2112,12 +2167,33 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
+        api_key = _extract_llm_api_key(text)
+        if api_key and _mentions_vision_model(text):
+            await self._handle_local_vision_key_setup(text, api_key)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if _requests_vision_key_reuse(text):
+            await self._handle_local_vision_key_reuse(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
         llm_setup = _parse_llm_setup_from_text(text, self.config)
         if llm_setup is not None:
             await self._handle_local_llm_setup(text, llm_setup)
             self.query_one("#user-input", TextArea).focus()
             return
 
+        if api_key:
+            if self._pending_llm_setup is not None and _is_bare_api_key(text):
+                pending_setup = {**self._pending_llm_setup, "api_key": api_key}
+                await self._handle_local_llm_setup(text, pending_setup)
+            else:
+                await self._handle_unscoped_api_key(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        self._pending_llm_setup = None
         if _requests_background_execution(text):
             self._enter_chat_mode()
             await self._mount_user_message(text)
@@ -2174,6 +2250,7 @@ class AeroApp(App):
 
         agent_msg = await self._mount_agent_message()
         if not setup.get("api_key"):
+            self._pending_llm_setup = dict(setup)
             preset = get_provider_preset(setup["provider"])
             if preset is None:
                 message = "请提供这个模型服务的 API key，或使用 /provider 选择内置服务商。"
@@ -2187,6 +2264,7 @@ class AeroApp(App):
             self._chat_log.append(f"Aero:\n{message}")
             return
 
+        self._pending_llm_setup = None
         _apply_llm_setup(self.config, setup)
         self._refresh_agent_llm_config()
         self._refresh_model_info()
@@ -2194,6 +2272,72 @@ class AeroApp(App):
         await agent_msg.update(message)
         self._chat_log.append(f"Aero:\n{message}")
         self._set_footer_status(message)
+
+    async def _handle_local_vision_key_setup(self, text: str, api_key: str) -> None:
+        self._enter_chat_mode()
+        masked_text = _mask_secret_text(text)
+        await self._mount_user_message(masked_text)
+        self._chat_log.append(f"你:\n{masked_text}")
+
+        normalized_key = _normalize_pasted_api_key(api_key)
+        self.config.vision.provider = "bailian"
+        self.config.vision.api_key = normalized_key
+        save_vision_api_key(normalized_key, self.config.vision.base_url)
+        if self.persist_config:
+            _save_config(self.config)
+
+        message = (
+            "视觉模型的百炼 API Key 已在本地更新。主聊天模型没有切换；"
+            "联网搜索会自动复用这份凭证。"
+        )
+        agent_msg = await self._mount_agent_message()
+        await agent_msg.update(message)
+        self._chat_log.append(f"Aero:\n{message}")
+        self._set_footer_status("视觉模型凭证已更新")
+
+    async def _handle_local_vision_key_reuse(self, text: str) -> None:
+        self._enter_chat_mode()
+        await self._mount_user_message(text)
+        self._chat_log.append(f"你:\n{text}")
+
+        configured = bool(self.config.vision.api_key)
+        if configured:
+            message = (
+                "已直接复用视觉模型配置中的百炼 API Key。无需再次提供密钥，"
+                "也不会切换主聊天模型。联网搜索是否可用还取决于百炼账户"
+                "是否已启用 WebSearch MCP 服务。"
+            )
+        else:
+            message = (
+                "当前没有检测到视觉模型的百炼 API Key。请明确输入"
+                "“配置视觉模型 API Key：<你的 Key>”，"
+                "密钥会在本地保存并在界面中脱敏。"
+            )
+        agent_msg = await self._mount_agent_message()
+        await agent_msg.update(message)
+        self._chat_log.append(f"Aero:\n{message}")
+
+    async def _handle_unscoped_api_key(self, text: str) -> None:
+        """Keep ambiguous secrets out of model prompts and conversation logs."""
+        self._enter_chat_mode()
+        masked_text = _mask_secret_text(text)
+        await self._mount_user_message(masked_text)
+        self._chat_log.append(f"你:\n{masked_text}")
+
+        if self.config.vision.api_key:
+            message = (
+                "检测到 API Key，已隐藏且未发送给模型。视觉模型凭证已经配置，"
+                "联网搜索会自动复用；本次没有修改主聊天模型。若要替换凭证，"
+                "请明确说明“更换视觉模型 API Key”。"
+            )
+        else:
+            message = (
+                "检测到 API Key，已隐藏且未发送给模型。请明确说明它用于主聊天模型还是视觉模型，"
+                "我再在本地保存，避免误改服务商。"
+            )
+        agent_msg = await self._mount_agent_message()
+        await agent_msg.update(message)
+        self._chat_log.append(f"Aero:\n{message}")
 
     async def _handle_local_llm_clear(self, text: str, *, reset_provider: bool = False) -> None:
         self._enter_chat_mode()
@@ -2472,6 +2616,7 @@ class AeroApp(App):
             ("/checkpoint", t("cmd.checkpoint", self.config.language)),
             ("/checkpoints", t("cmd.checkpoints", self.config.language)),
             ("/restore", t("cmd.restore", self.config.language)),
+            ("/paper", t("cmd.paper", self.config.language)),
             ("/experiment", t("cmd.experiment", self.config.language)),
             ("/experiments", t("cmd.experiments", self.config.language)),
             ("/compact", t("cmd.compact", self.config.language)),
@@ -2489,6 +2634,16 @@ class AeroApp(App):
             ("/checkpoints all", "包含恢复保护记录的完整列表"),
             ("/checkpoints clear", "清理全部检查点"),
             ("/restore ", "预览差异并恢复检查点"),
+            ("/paper init", "创建并绑定 paper/main.md"),
+            ("/paper status", "查看论文正文是否有未保存变化"),
+            ("/paper save ", "保存当前论文版本"),
+            ("/paper versions", "查看论文版本历史"),
+            ("/paper versions all", "包含恢复保护版本的完整历史"),
+            ("/paper diff ", "比较当前正文与已保存版本"),
+            ("/paper restore ", "预览并恢复论文版本"),
+            ("/paper export latex", "导出 LaTeX 文档"),
+            ("/paper export word", "导出并嵌入图片的 Word 文档"),
+            ("/paper export pdf", "导出并嵌入图片的 PDF 文档"),
             ("/experiment new ", "创建独立实验工作区"),
             ("/experiment delete ", "永久删除指定实验"),
             ("/experiment finish", "总结并完成当前实验"),
@@ -2805,6 +2960,257 @@ class AeroApp(App):
                 self._project_dir / ".aero" / "experiment-sessions"
             )
         return self._experiment_session_mgr
+
+    def _get_paper_version_mgr(self) -> PaperVersionManager:
+        # Paper history always belongs to the project, even while an experiment is active.
+        return PaperVersionManager(self._project_dir)
+
+    async def _handle_paper_command(self, text: str) -> None:
+        parts = text.strip().split(maxsplit=2)
+        action = parts[1].lower() if len(parts) > 1 else ""
+        argument = parts[2].strip() if len(parts) > 2 else ""
+        manager = self._get_paper_version_mgr()
+        usage = (
+            "### 论文版本\n\n"
+            "- `/paper init`：创建并绑定 `paper/main.md`，保存初始版本\n"
+            "- `/paper status`：查看是否有未保存变化\n"
+            "- `/paper save 版本说明`：保存当前版本\n"
+            "- `/paper versions`：查看版本历史；加 `all` 显示保护版本\n"
+            "- `/paper diff [版本ID]`：逐行查看变化\n"
+            "- `/paper restore 版本ID`：确认后恢复正文\n"
+            "- `/paper export latex|word|pdf`：导出论文文档"
+        )
+        try:
+            if not action:
+                self._show_checkpoint_message(usage, force_scroll=True)
+                return
+            if action == "init":
+                if argument:
+                    self._show_checkpoint_message(
+                        "`/paper init` 不接受路径参数，论文正文固定为 `paper/main.md`。",
+                        force_scroll=True,
+                    )
+                    return
+                result = manager.initialize()
+                created = "并已保存初始版本" if result.get("created") else ""
+                self._show_checkpoint_message(
+                    "### 论文版本管理已启用\n\n"
+                    f"正文：`{result['document']}`  {created}\n\n"
+                    "之后只有固定的 `paper/main.md` 会进入版本历史，其他文件不受影响。",
+                    force_scroll=True,
+                )
+                return
+            if action == "status":
+                status = manager.status()
+                if not status.get("initialized"):
+                    self._show_checkpoint_message(
+                        "尚未初始化论文正文。使用 `/paper init` 开始。",
+                        force_scroll=True,
+                    )
+                    return
+                head = status.get("head") or {}
+                change_text = "有未保存变化" if status["changed"] else "与当前版本一致"
+                self._show_checkpoint_message(
+                    "### 论文版本状态\n\n"
+                    f"- 正文：`{status['document']}`\n"
+                    f"- 当前版本：`{head.get('id', '无')}` {head.get('title', '')}\n"
+                    f"- 状态：**{change_text}**\n"
+                    f"- 已保存版本：{status['version_count']} 个",
+                    force_scroll=True,
+                )
+                return
+            if action == "save":
+                version = manager.save(argument)
+                if version.get("created"):
+                    message = (
+                        "### 论文版本已保存\n\n"
+                        f"`{version['id']}`  **{version['title']}**"
+                    )
+                else:
+                    message = (
+                        "论文正文没有变化，未重复创建版本。\n\n"
+                        f"当前版本：`{version['id']}`  **{version['title']}**"
+                    )
+                self._show_checkpoint_message(message, force_scroll=True)
+                return
+            if action == "versions":
+                include_safety = argument.lower() == "all"
+                if argument and not include_safety:
+                    self._show_checkpoint_message(
+                        "用法：`/paper versions` 或 `/paper versions all`。",
+                        force_scroll=True,
+                    )
+                    return
+                versions = manager.list(include_safety=include_safety)
+                if not versions:
+                    self._show_checkpoint_message("还没有论文版本。", force_scroll=True)
+                    return
+                lines = ["### 论文版本历史", ""]
+                for item in versions:
+                    created = datetime.fromtimestamp(item["created_at"]).astimezone()
+                    safety = " · 恢复保护" if item.get("kind") == "pre-restore" else ""
+                    lines.append(
+                        f"- `{item['id']}`  **{item['title']}** · "
+                        f"{created.strftime('%Y-%m-%d %H:%M:%S')}{safety}"
+                    )
+                lines.extend(["", "使用 `/paper diff 版本ID` 查看变化，或 `/paper restore 版本ID` 恢复正文。"])
+                self._show_checkpoint_message("\n".join(lines), force_scroll=True)
+                return
+            if action == "diff":
+                difference = manager.diff(argument or None)
+                if not difference.changed:
+                    message = (
+                        "论文正文与所选版本一致。\n\n"
+                        f"版本：`{difference.version_id}`"
+                    )
+                else:
+                    diff_text = difference.unified_diff
+                    if len(diff_text) > 24000:
+                        diff_text = diff_text[:24000].rstrip() + "\n...（差异过长，已截断）"
+                    message = (
+                        "### 论文逐行变化\n\n"
+                        f"版本：`{difference.version_id}` · 新增 {difference.added_lines} 行 · "
+                        f"删除 {difference.removed_lines} 行\n\n"
+                        f"```diff\n{diff_text}\n```"
+                    )
+                self._show_checkpoint_message(message, force_scroll=True)
+                return
+            if action == "restore":
+                if not argument:
+                    self._show_checkpoint_message(
+                        "用法：`/paper restore 版本ID`。", force_scroll=True
+                    )
+                    return
+                target = manager.load(argument)
+                if target is None:
+                    raise ValueError(f"找不到论文版本：{argument}")
+                difference = manager.diff(argument)
+                message = (
+                    f"将把 `{difference.document}` 恢复到：\n\n"
+                    f"`{target['id']}`  **{target['title']}**\n\n"
+                    f"当前正文将变化：新增 {difference.added_lines} 行，删除 {difference.removed_lines} 行。\n\n"
+                    "只会覆盖这份 Markdown 正文，其他文件不会改变。"
+                    "当前正文若含未保存变化，会先自动保存为恢复保护版本。"
+                )
+                self.screen.add_class("confirming")
+                try:
+                    choice = await self.push_screen_wait(
+                        ConfirmScreen(
+                            message,
+                            self.config.language,
+                            title="恢复论文版本",
+                            allow_label="恢复到此版",
+                            deny_label="取消",
+                            show_always=False,
+                        )
+                    )
+                finally:
+                    self.screen.remove_class("confirming")
+                if _normalize_confirm_choice(choice) not in {"approve", "allow", "always"}:
+                    self._show_checkpoint_message("已取消恢复论文版本。", force_scroll=True)
+                    return
+                result = manager.restore(argument)
+                restored = result["restored"]
+                protection = result.get("protection_version")
+                protection_text = (
+                    f"\n\n恢复前内容已保存为保护版本：`{protection['id']}`"
+                    if protection
+                    else ""
+                )
+                self._show_checkpoint_message(
+                    "### 论文版本已恢复\n\n"
+                    f"正文：`{result['document']}`\n\n"
+                    f"版本：`{restored['id']}`  **{restored['title']}**"
+                    f"{protection_text}",
+                    force_scroll=True,
+                )
+                return
+            if action in {"export", "latex"}:
+                if action == "latex" and argument:
+                    self._show_checkpoint_message(
+                        "用法：`/paper export latex|word|pdf`。",
+                        force_scroll=True,
+                    )
+                    return
+                output_format = "latex" if action == "latex" else argument.lower()
+                if output_format not in {"latex", "word", "pdf"}:
+                    self._show_checkpoint_message(
+                        "用法：`/paper export latex|word|pdf`。",
+                        force_scroll=True,
+                    )
+                    return
+                from aero.agent.runtime import Runtime
+
+                env = Runtime._build_exec_env()
+                try:
+                    result = export_paper(
+                        self._project_dir,
+                        output_format,
+                        env=env,
+                    )
+                except PaperExportError as exc:
+                    if not exc.missing_tools:
+                        raise
+                    tools_label = "、".join(
+                        tool.title() for tool in exc.missing_tools
+                    )
+                    self.screen.add_class("confirming")
+                    try:
+                        choice = await self.push_screen_wait(
+                            ConfirmScreen(
+                                f"导出 {output_format.upper()} 需要 {tools_label}。"
+                                "是否安装到 aero-agent 运行环境？",
+                                self.config.language,
+                                title="安装论文转换组件",
+                                allow_label="安装并继续",
+                                deny_label="取消",
+                                show_always=False,
+                            )
+                        )
+                    finally:
+                        self.screen.remove_class("confirming")
+                    if _normalize_confirm_choice(choice) not in {
+                        "approve",
+                        "allow",
+                        "always",
+                    }:
+                        self._show_checkpoint_message(
+                            "已取消 LaTeX 导出。", force_scroll=True
+                        )
+                        return
+                    from aero.toolbox.tools.runtime import ensure_runtime_tools
+
+                    self._set_footer_status(f"正在安装 {tools_label}…")
+                    await asyncio.sleep(0)
+                    installed = await ensure_runtime_tools(exc.missing_tools)
+                    if installed.get("status") != "success":
+                        self._set_footer_status("论文转换组件安装失败")
+                        raise PaperExportError(
+                            str(installed.get("message") or "论文转换组件安装失败。")
+                        )
+                    self._set_footer_status("转换组件安装完成，正在导出论文…")
+                    await asyncio.sleep(0)
+                    env = Runtime._build_exec_env()
+                    result = export_paper(
+                        self._project_dir,
+                        output_format,
+                        env=env,
+                    )
+                format_labels = {"latex": "LaTeX", "word": "Word", "pdf": "PDF"}
+                format_label = format_labels[output_format]
+                self._set_footer_status(f"{format_label} 论文已生成")
+                self._show_checkpoint_message(
+                    f"### {format_label} 论文已生成\n\n"
+                    f"源文件：`{result['source']}`\n\n"
+                    f"输出文件：`{result['output']}`",
+                    force_scroll=True,
+                )
+                return
+            self._show_checkpoint_message(usage, force_scroll=True)
+        except Exception as exc:
+            if action in {"export", "latex"}:
+                self._set_footer_status("论文导出失败")
+            self._show_checkpoint_message(f"论文版本操作失败：{exc}", force_scroll=True)
 
     def _resume_latest_project_session(self) -> bool:
         latest = self._get_session_mgr().latest_session(self._project_dir)
@@ -3457,6 +3863,9 @@ class AeroApp(App):
         self, experiment: dict, messages: list[Message], artifacts: list[str]
     ) -> str:
         fallback = _fallback_experiment_report(experiment, messages, artifacts)
+        from aero.data.memos import render_memo_context
+
+        memo_context = render_memo_context(self._project_dir)
         client = None
         try:
             from aero.agent.llm_client import LLMConfig, LLMClient
@@ -3474,7 +3883,7 @@ class AeroApp(App):
                     Message(
                         role="user",
                         content=_experiment_report_prompt(
-                            experiment, messages, artifacts
+                            experiment, messages, artifacts, memo_context
                         ),
                     )
                 ]
@@ -5027,17 +5436,42 @@ class AeroApp(App):
                 screen = ExecutionApprovalScreen(self.config.language)
                 return await self.push_screen_wait(screen)
             message = self._build_confirm_message(tool_name, args, batch_args)
+            if tool_name in {
+                "record_memo",
+                "update_memo",
+                "delete_memo",
+                "clear_memos",
+                "restore_paper_version",
+            }:
+                labels = {
+                    "record_memo": ("加入备忘录", "确认加入"),
+                    "update_memo": ("更新备忘录", "确认更新"),
+                    "delete_memo": ("删除备忘录", "确认删除"),
+                    "clear_memos": ("清理备忘录", "确认清理"),
+                    "restore_paper_version": ("恢复论文版本", "恢复到此版"),
+                }
+                title, allow_label = labels[tool_name]
+                screen = ConfirmScreen(
+                    message,
+                    self.config.language,
+                    title=title,
+                    allow_label=allow_label,
+                    deny_label="取消",
+                    show_always=False,
+                )
+                return await self.push_screen_wait(screen)
             screen = ConfirmScreen(message, self.config.language)
             return await self.push_screen_wait(screen)
         finally:
             self.screen.remove_class("confirming")
 
     async def _handle_confirm(self, content: str) -> None:
+        tool_name = str(json.loads(content).get("tool", ""))
         choice = await self._show_confirm_dialog(content)
         debug_log("tui.confirm_dialog_closed", choice=choice)
         choice = _normalize_confirm_choice(choice)
         if choice in {"approve", "allow", "always"}:
-            if self.config.mode == "plan":
+            if self.config.mode == "plan" and tool_name == "propose_execution":
                 debug_log("tui.confirm_mode_switch", from_mode="plan", to_mode="execute")
                 self._set_mode("execute")
         elif choice == "deny":
@@ -5064,6 +5498,42 @@ class AeroApp(App):
     ) -> str:
         lang = self.config.language
         action_label = _CONFIRM_ACTION_LABELS.get(tool_name, "执行操作")
+        if tool_name == "record_memo":
+            proposals = batch_args or [args]
+            blocks = []
+            for index, proposal in enumerate(proposals, start=1):
+                title = str(proposal.get("title") or "未命名结论").strip()
+                content = str(proposal.get("content") or "").strip()
+                evidence = str(proposal.get("evidence") or "").strip()
+                block = f"{index}. {title}\n\n{content}"
+                if evidence:
+                    block += f"\n\n依据或限制：{evidence}"
+                blocks.append(block)
+            return "准备加入以下研究备忘：\n\n" + "\n\n──\n\n".join(blocks)
+        if tool_name == "update_memo":
+            fields = []
+            for label, key in (
+                ("标题", "title"),
+                ("正文", "content"),
+                ("依据或限制", "evidence"),
+            ):
+                value = args.get(key)
+                if value is not None:
+                    fields.append(f"{label}：{value}")
+            if args.get("tags") is not None:
+                fields.append(f"标签：{'、'.join(args.get('tags') or []) or '无'}")
+            changes = "\n\n".join(fields) or "未提供更新内容"
+            return f"准备更新备忘录 {args.get('memo_id', '未知')}：\n\n{changes}"
+        if tool_name == "delete_memo":
+            return f"将永久删除备忘录：\n\n  {args.get('memo_id', '未知')}"
+        if tool_name == "clear_memos":
+            return "将永久清理当前项目的全部研究备忘录。此操作不可撤销。"
+        if tool_name == "restore_paper_version":
+            return (
+                f"将论文正文恢复到版本：\n\n  {args.get('version_id', '未知')}\n\n"
+                "只会覆盖当前项目绑定的 Markdown 论文正文，其他文件不会改变。"
+                "若正文有未保存变化，恢复前会自动保存一个保护版本。"
+            )
         if batch_args:
             if tool_name == "delete_file":
                 paths = [a.get("file_path", "未知") for a in batch_args]
@@ -5237,6 +5707,14 @@ def _mask_secret_text(text: str) -> str:
     return text.replace(key, _mask_secret(key))
 
 
+def _is_bare_api_key(text: str) -> bool:
+    key = _extract_llm_api_key(text)
+    if not key:
+        return False
+    stripped = text.strip().strip("'\"`，,。;；")
+    return stripped == key
+
+
 def _mask_secret(value: str) -> str:
     if len(value) <= 8:
         return "*" * len(value)
@@ -5255,6 +5733,15 @@ def _mentions_vision_model(text: str) -> bool:
             "看图",
             "识图",
         )
+    )
+
+
+def _requests_vision_key_reuse(text: str) -> bool:
+    lowered = text.lower()
+    return (
+        _mentions_vision_model(text)
+        and any(marker in lowered for marker in ("复用", "共用", "使用已有", "直接用"))
+        and any(marker in lowered for marker in ("api key", "apikey", "key", "密钥"))
     )
 
 
@@ -5699,7 +6186,7 @@ def _command_suggestions(
 
 def _command_requires_input(command: str) -> bool:
     """Return whether Enter should complete this command instead of executing it."""
-    return command.rstrip() in {"/set", "/restore", "/experiment"}
+    return command.rstrip() in {"/set", "/restore", "/experiment", "/paper"}
 
 
 def _estimate_context_tokens(messages: list[Message]) -> int:
@@ -5936,7 +6423,10 @@ def _checkpoint_title_prompt(messages: list[Message], language: str) -> str:
 
 
 def _experiment_report_prompt(
-    experiment: dict, messages: list[Message], artifacts: list[str]
+    experiment: dict,
+    messages: list[Message],
+    artifacts: list[str],
+    memo_context: str = "",
 ) -> str:
     transcript: list[str] = []
     for message in messages:
@@ -5947,12 +6437,15 @@ def _experiment_report_prompt(
         transcript.append(f"{role}: {content}")
     conversation = "\n".join(transcript[-20:]) or "无有效对话记录"
     artifact_text = "\n".join(f"- {path}" for path in artifacts[:200]) or "- 无"
+    memo_text = memo_context.strip() or "无"
     return (
         f"请为实验“{experiment['name']}”撰写一份简洁、可独立阅读的 Markdown 实验报告。\n"
         "必须包含：目标、方法与过程、关键结果、结论、局限或未解决问题、产物清单。"
-        "只能依据下面的对话和产物，不得编造结果；没有证据的内容明确写为未确认。"
+        "只能依据下面的对话、产物和研究备忘录，不得编造结果；没有证据的内容明确写为未确认。"
+        "备忘录是候选结论，必须结合其中的依据和实验内容判断是否采用，并保留相关备忘录 ID。"
         "不要提及内部工具名，也不要添加报告之外的寒暄。\n\n"
-        f"实验对话：\n{conversation}\n\n产物：\n{artifact_text}"
+        f"实验对话：\n{conversation}\n\n产物：\n{artifact_text}\n\n"
+        f"研究备忘录：\n{memo_text}"
     )
 
 
@@ -6111,6 +6604,7 @@ def _help_text(lang: str) -> str:
         t("help.slash_checkpoints", lang),
         t("help.slash_checkpoints_clear", lang),
         t("help.slash_restore", lang),
+        t("help.slash_paper", lang),
         t("help.slash_experiment", lang),
         t("help.slash_experiment_delete", lang),
         t("help.slash_experiment_finish", lang),

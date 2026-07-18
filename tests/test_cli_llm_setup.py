@@ -1,10 +1,15 @@
 """Tests for local LLM setup helpers."""
 
+import pytest
+
 from aero.cli.main import (
+    AeroApp,
     _extract_llm_api_key,
+    _is_bare_api_key,
     _mask_secret_text,
     _parse_llm_clear_from_text,
     _parse_llm_setup_from_text,
+    _requests_vision_key_reuse,
 )
 from aero.core.config import AeroConfig
 
@@ -116,3 +121,29 @@ def test_mask_secret_text():
 
     assert _extract_llm_api_key(text) == "sk-test-0004"
     assert _mask_secret_text(text) == "配置 qwen3.7，API key: sk-t...0004"
+
+
+def test_bare_api_key_detection():
+    assert _is_bare_api_key("sk-test-0004") is True
+    assert _is_bare_api_key("API key: sk-test-0004") is False
+    assert _is_bare_api_key("请使用 sk-test-0004 配置视觉模型") is False
+
+
+def test_detect_vision_key_reuse_request():
+    assert _requests_vision_key_reuse("你直接复用视觉模型的 API Key") is True
+    assert _requests_vision_key_reuse("切换主模型 API Key") is False
+
+
+@pytest.mark.asyncio
+async def test_bare_api_key_is_masked_and_never_starts_agent():
+    config = AeroConfig.create_default()
+    config.vision.api_key = "sk-existing-vision"
+    app = AeroApp(config, persist_config=False)
+
+    async with app.run_test(size=(100, 30)):
+        await app._process("sk-new-sensitive-value")
+
+    transcript = "\n".join(app._chat_log)
+    assert "sk-new-sensitive-value" not in transcript
+    assert "sk-n...alue" in transcript
+    assert app._agent_worker is None

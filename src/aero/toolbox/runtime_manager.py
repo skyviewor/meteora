@@ -16,6 +16,8 @@ from pathlib import Path
 from aero.agent.runtime import _conda_roots
 
 RUNTIME_TOOL_PACKAGES = {
+    "pandoc": ("pandoc", ["pandoc"]),
+    "tectonic": ("tectonic", ["tectonic"]),
     "cdo": ("cdo", ["cdo"]),
     "grib_to_netcdf": (
         "eccodes",

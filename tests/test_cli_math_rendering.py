@@ -2,6 +2,10 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
+from textual import events
+from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
+from textual.widgets import Static
 
 from aero.cli.main import (
     AeroApp,
@@ -250,6 +254,7 @@ def test_commands_with_required_followup_are_completed_before_execution():
     assert _command_requires_input("/set") is True
     assert _command_requires_input("/restore") is True
     assert _command_requires_input("/experiment") is True
+    assert _command_requires_input("/paper") is True
     assert _command_requires_input("/checkpoints") is False
     assert _command_requires_input("/checkpoints all") is False
     assert _command_requires_input("/checkpoint") is False
@@ -278,6 +283,47 @@ def test_operation_confirmation_hides_session_wide_permission():
     assert screen._allow_label == "确认恢复"
     assert screen._deny_label == "取消"
     assert screen._button_ids == ("#btn-allow", "#btn-deny")
+
+
+@pytest.mark.asyncio
+async def test_confirm_scroll_keys_do_not_reach_background_chat():
+    class ConfirmHost(App):
+        def __init__(self):
+            super().__init__()
+            self.background_key_events = 0
+
+        def compose(self) -> ComposeResult:
+            with VerticalScroll(id="background-chat"):
+                for index in range(80):
+                    yield Static(f"background line {index}")
+
+        def on_key(self, event: events.Key) -> None:
+            if event.key == "up":
+                self.background_key_events += 1
+                self.query_one("#background-chat", VerticalScroll).scroll_up(
+                    animate=False
+                )
+
+    app = ConfirmHost()
+    async with app.run_test(size=(100, 30)) as pilot:
+        background = app.query_one("#background-chat", VerticalScroll)
+        background.scroll_end(animate=False)
+        await pilot.pause()
+        background_before = background.scroll_y
+
+        screen = ConfirmScreen("\n".join(f"memo line {i}" for i in range(80)))
+        await app.push_screen(screen)
+        message_box = screen.query_one("#confirm-message-box", VerticalScroll)
+        message_box.scroll_end(animate=False)
+        await pilot.pause()
+        message_before = message_box.scroll_y
+
+        await pilot.press("up")
+        await pilot.pause()
+
+        assert app.background_key_events == 0
+        assert background.scroll_y == background_before
+        assert message_box.scroll_y < message_before
 
 
 def test_restore_confirmation_uses_user_facing_file_actions():

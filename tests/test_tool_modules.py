@@ -18,7 +18,20 @@ MIGRATED_TOOLS = (
     "record_instruction",
     "show_instructions",
     "clear_instructions",
+    "record_memo",
+    "show_memos",
+    "update_memo",
+    "delete_memo",
+    "clear_memos",
+    "initialize_paper_versioning",
+    "paper_version_status",
+    "save_paper_version",
+    "list_paper_versions",
+    "diff_paper_version",
+    "restore_paper_version",
+    "export_paper",
     "search_literature",
+    "search_web",
     "save_literature",
     "download_literature_pdf",
     "list_literature",
@@ -42,6 +55,7 @@ MIGRATED_TOOLS = (
     "edit_file",
     "read_pdf",
     "preview_image",
+    "preview_pdf",
     "ensure_runtime_tools",
     "run_shell",
     "list_downloads",
@@ -91,3 +105,11 @@ def test_preview_image_tool_description_requires_inline_image_too():
     assert "Markdown 图片语法" in tool.description
     assert "嵌入对话框" in tool.description
     assert "不能替代对话内预览" in tool.description
+
+
+def test_preview_pdf_tool_description_distinguishes_opening_from_reading():
+    tool = get_registry().get("preview_pdf")
+
+    assert tool is not None
+    assert "系统默认 PDF 查看器" in tool.description
+    assert "不要让用户自己复制路径" in tool.description

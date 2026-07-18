@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,6 +22,22 @@ from aero.data.pricing import TokenTracker
 logger = structlog.get_logger()
 
 _INDEX_FILE = "_index.json"
+_REDACTED_SECRET = "[API_KEY_REDACTED]"
+_SK_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_.-]{6,}\b", re.IGNORECASE)
+_LABELED_SECRET_RE = re.compile(
+    r"((?:api\s*key|apikey|access[_ -]?token|password|secret|密钥)\s*[:：=]\s*)"
+    r"([A-Za-z0-9][A-Za-z0-9_.-]{7,})",
+    re.IGNORECASE,
+)
+_SECRET_FIELD_NAMES = {
+    "api_key",
+    "apikey",
+    "key",
+    "access_token",
+    "token",
+    "password",
+    "secret",
+}
 
 
 def _fernet_key_path() -> Path:
@@ -77,7 +94,7 @@ class SessionMeta:
             "mode": self.mode,
             "title_source": self.title_source,
             "project_dir": self.project_dir,
-            "transcript": self.transcript,
+            "transcript": _redact_secret_value(self.transcript),
         }
 
     @classmethod
@@ -95,7 +112,7 @@ class SessionMeta:
             mode=d.get("mode", ""),
             title_source=d.get("title_source", ""),
             project_dir=d.get("project_dir", ""),
-            transcript=d.get("transcript", []),
+            transcript=_redact_secret_value(d.get("transcript", [])),
         )
 
 
@@ -221,12 +238,16 @@ class SessionManager:
 
 
 def _serialize_message(m: Message) -> dict:
-    d = {"role": m.role, "content": m.content}
+    d = {"role": m.role, "content": _redact_secret_text(m.content)}
     if m.tool_call_id:
         d["tool_call_id"] = m.tool_call_id
     if m.tool_calls:
         d["tool_calls"] = [
-            {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+            {
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": _redact_secret_value(tc.arguments),
+            }
             for tc in m.tool_calls
         ]
     return d
@@ -236,12 +257,39 @@ def _deserialize_message(d: dict) -> Message:
     tool_calls = None
     if "tool_calls" in d:
         tool_calls = [
-            ToolCall(id=tc["id"], name=tc["name"], arguments=tc["arguments"])
+            ToolCall(
+                id=tc["id"],
+                name=tc["name"],
+                arguments=_redact_secret_value(tc["arguments"]),
+            )
             for tc in d["tool_calls"]
         ]
     return Message(
         role=d["role"],
-        content=d.get("content", ""),
+        content=_redact_secret_text(d.get("content", "")),
         tool_call_id=d.get("tool_call_id"),
         tool_calls=tool_calls,
     )
+
+
+def _redact_secret_text(value: str) -> str:
+    text = str(value or "")
+    text = _SK_SECRET_RE.sub(_REDACTED_SECRET, text)
+    return _LABELED_SECRET_RE.sub(rf"\1{_REDACTED_SECRET}", text)
+
+
+def _redact_secret_value(value, *, field_name: str = ""):
+    if isinstance(value, dict):
+        return {
+            key: _redact_secret_value(item, field_name=str(key).lower())
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secret_value(item, field_name=field_name) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_secret_value(item, field_name=field_name) for item in value)
+    if isinstance(value, str):
+        if field_name in _SECRET_FIELD_NAMES and len(value) >= 8:
+            return _REDACTED_SECRET
+        return _redact_secret_text(value)
+    return value

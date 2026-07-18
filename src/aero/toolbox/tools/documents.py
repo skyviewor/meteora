@@ -1,4 +1,4 @@
-"""PDF extraction and system image preview tools."""
+"""PDF extraction and system document preview tools."""
 
 import os
 import subprocess
@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 from aero.toolbox.file_access import READ_FILES
-from aero.toolbox.paths import find_project_dir, short_path
+from aero.toolbox.paths import (
+    find_project_dir,
+    find_workspace_dir,
+    resolve_project_path,
+    short_path,
+)
 from aero.toolbox.registry import register_tool
 
 
@@ -51,6 +56,40 @@ async def read_pdf(file_path: str) -> dict:
 
 
 @register_tool(
+    name="preview_pdf",
+    description=(
+        "用系统默认 PDF 查看器打开本地 PDF 文件。用户说“打开这个 PDF”、"
+        "“把 PDF 打开”或“打开这篇论文”等自然表达时必须调用；不要让用户自己复制路径，"
+        "也不要把“打开”误解成仅提取 PDF 文本。只有用户要求阅读、提取或分析内容时才使用读取能力。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "file_path": {
+                "type": "string",
+                "description": "项目或当前实验工作区内 PDF 文件的相对路径。",
+            },
+        },
+        "required": ["file_path"],
+    },
+)
+def preview_pdf(file_path: str) -> dict:
+    path, error = _resolve_preview_path(file_path, suffix=".pdf")
+    if error:
+        return {"status": "error", "message": error}
+
+    try:
+        _open_with_system_default(path)
+        return {
+            "status": "success",
+            "message": f"已用系统默认应用打开 PDF: {short_path(path)}",
+            "file_path": short_path(path),
+        }
+    except Exception as exc:
+        return {"status": "error", "message": f"无法打开 PDF: {exc}"}
+
+
+@register_tool(
     name="preview_image",
     description=(
         "用系统默认图片查看器打开一张图片。当用户明确说打开图片、打开这张图、"
@@ -89,3 +128,24 @@ def preview_image(file_path: str) -> dict:
         }
     except Exception as e:
         return {"status": "error", "message": f"无法打开图片: {e}"}
+
+
+def _resolve_preview_path(file_path: str, *, suffix: str) -> tuple[Path, str]:
+    path = resolve_project_path(Path(file_path).expanduser()).resolve()
+    roots = {find_project_dir().resolve(), find_workspace_dir().resolve()}
+    if not any(path == root or path.is_relative_to(root) for root in roots):
+        return path, "只能打开当前项目或实验工作区内的文件。"
+    if not path.is_file():
+        return path, f"文件不存在: {short_path(file_path)}"
+    if path.suffix.lower() != suffix:
+        return path, f"文件不是 {suffix.removeprefix('.').upper()}: {short_path(file_path)}"
+    return path, ""
+
+
+def _open_with_system_default(path: Path) -> None:
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(path)], check=True)
+    elif sys.platform.startswith("win"):
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.run(["xdg-open", str(path)], check=True)
