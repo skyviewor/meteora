@@ -149,7 +149,8 @@ async def test_ensure_runtime_tools_skips_install_when_ready(monkeypatch, tmp_pa
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     base_bin = root / "bin"
     env_bin = root / "envs" / "aero-agent" / "bin"
     base_bin.mkdir(parents=True)
@@ -186,19 +187,18 @@ async def test_ensure_runtime_tools_skips_install_when_ready(monkeypatch, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_ensure_runtime_tools_installs_missing_and_symlinks(monkeypatch, tmp_path):
+async def test_ensure_runtime_tools_installs_missing_in_private_runtime(monkeypatch, tmp_path):
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     base_bin = root / "bin"
     env_bin = root / "envs" / "aero-agent" / "bin"
     base_bin.mkdir(parents=True)
     env_bin.mkdir(parents=True)
     conda = base_bin / "conda"
-    mamba = env_bin / "mamba"
     conda.write_text("#!/bin/sh\n")
-    mamba.write_text("#!/bin/sh\n")
 
     calls = []
 
@@ -226,37 +226,39 @@ async def test_ensure_runtime_tools_installs_missing_and_symlinks(monkeypatch, t
 
     assert result["status"] == "success"
     assert result["packages"] == ["cdo", "eccodes"]
-    assert calls[0][:4] == [str(mamba), "install", "-p", str(env_bin.parent)]
-    assert result["package_manager"] == str(mamba)
-    assert (base_bin / "cdo").is_symlink()
-    assert (base_bin / "grib_to_netcdf").is_symlink()
+    assert calls[0][:3] == [str(conda), "install", "--yes"]
+    assert ["--root-prefix", str(root)] == calls[0][3:5]
+    assert ["--prefix", str(env_bin.parent)] == calls[0][5:7]
+    assert result["package_manager"] == str(conda)
+    assert result["symlinks"] == []
 
 
 @pytest.mark.asyncio
-async def test_ensure_runtime_tools_installs_mamba_when_missing(monkeypatch, tmp_path):
+async def test_ensure_runtime_tools_creates_private_environment_when_missing(
+    monkeypatch, tmp_path
+):
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     base_bin = root / "bin"
     env_bin = root / "envs" / "aero-agent" / "bin"
     base_bin.mkdir(parents=True)
     env_bin.mkdir(parents=True)
     conda = base_bin / "conda"
-    mamba = env_bin / "mamba"
     conda.write_text("#!/bin/sh\n")
-    for tool in ("cdo",):
-        path = env_bin / tool
-        path.write_text("#!/bin/sh\n")
-        path.chmod(0o755)
 
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        if cmd[:5] == [str(conda), "install", "-n", "aero-agent", "-c"]:
-            mamba.write_text("#!/bin/sh\n")
-            mamba.chmod(0o755)
+        if cmd[1] == "create":
+            env_bin.mkdir(parents=True, exist_ok=True)
+        else:
+            path = env_bin / "cdo"
+            path.write_text("#!/bin/sh\n")
+            path.chmod(0o755)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(
@@ -272,67 +274,35 @@ async def test_ensure_runtime_tools_installs_mamba_when_missing(monkeypatch, tmp
     result = await builtin_tools.ensure_runtime_tools(["cdo"])
 
     assert result["status"] == "success"
-    assert calls[0] == [
-        str(conda),
-        "create",
-        "-n",
-        "aero-agent",
-        "-c",
-        "conda-forge",
-        "--override-channels",
-        "python=3.12",
-        "-y",
-    ]
-    assert calls[1] == [
-        str(conda),
-        "install",
-        "-n",
-        "aero-agent",
-        "-c",
-        "conda-forge",
-        "--override-channels",
-        "mamba",
-        "-y",
-    ]
-    assert calls[2][:4] == [str(mamba), "install", "-p", str(env_bin.parent)]
+    assert calls[0][:3] == [str(conda), "create", "--yes"]
+    assert ["--root-prefix", str(root)] == calls[0][3:5]
+    assert ["--prefix", str(env_bin.parent)] == calls[0][5:7]
+    assert calls[1][:3] == [str(conda), "install", "--yes"]
     assert result["env_create_command"] == " ".join(calls[0])
-    assert result["mamba_install_command"] == " ".join(calls[1])
-    assert result["package_manager"] == str(mamba)
+    assert result["mamba_install_command"] is None
+    assert result["package_manager"] == str(conda)
 
 
 @pytest.mark.asyncio
-async def test_ensure_runtime_tools_falls_back_to_conda_when_mamba_install_fails(
+async def test_ensure_runtime_tools_reports_private_package_install_failure(
     monkeypatch, tmp_path
 ):
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     base_bin = root / "bin"
     env_bin = root / "envs" / "aero-agent" / "bin"
     base_bin.mkdir(parents=True)
     env_bin.mkdir(parents=True)
     conda = base_bin / "conda"
     conda.write_text("#!/bin/sh\n")
-    cdo = env_bin / "cdo"
-    cdo.write_text("#!/bin/sh\n")
-    cdo.chmod(0o755)
-
     calls = []
 
     def fake_run(cmd, **kwargs):
         calls.append(cmd)
-        if cmd == [
-            str(conda),
-            "install",
-            "-n",
-            "aero-agent",
-            "-c",
-            "conda-forge",
-            "--override-channels",
-            "mamba",
-            "-y",
-        ]:
+        if cmd[1] == "install":
             return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="solve failed")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -348,42 +318,10 @@ async def test_ensure_runtime_tools_falls_back_to_conda_when_mamba_install_fails
 
     result = await builtin_tools.ensure_runtime_tools(["cdo"])
 
-    assert result["status"] == "success"
-    assert calls[0] == [
-        str(conda),
-        "create",
-        "-n",
-        "aero-agent",
-        "-c",
-        "conda-forge",
-        "--override-channels",
-        "python=3.12",
-        "-y",
-    ]
-    assert calls[1] == [
-        str(conda),
-        "install",
-        "-n",
-        "aero-agent",
-        "-c",
-        "conda-forge",
-        "--override-channels",
-        "mamba",
-        "-y",
-    ]
-    assert calls[2] == [
-        str(conda),
-        "install",
-        "-n",
-        "aero-agent",
-        "-c",
-        "conda-forge",
-        "--override-channels",
-        "cdo",
-        "-y",
-    ]
-    assert result["package_manager"] == str(conda)
-    assert result["mamba_install_error"] == "mamba 安装失败。"
+    assert result["status"] == "error"
+    assert result["message"] == "运行时工具安装失败。"
+    assert calls[0][1] == "create"
+    assert calls[1][1] == "install"
 
 
 @pytest.mark.asyncio
@@ -392,6 +330,7 @@ async def test_run_shell_rejects_managed_tool_outside_aero_agent(monkeypatch, tm
     from aero.toolbox import builtin_tools
 
     base_bin = tmp_path / "miniconda3" / "bin"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(tmp_path / "runtime"))
     base_bin.mkdir(parents=True)
     grib_to_netcdf = base_bin / "grib_to_netcdf"
     grib_to_netcdf.write_text("#!/bin/sh\n")
@@ -416,7 +355,8 @@ async def test_run_shell_allows_managed_tool_inside_aero_agent(monkeypatch, tmp_
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     env_bin = root / "envs" / "aero-agent" / "bin"
     env_bin.mkdir(parents=True)
     grib_to_netcdf = env_bin / "grib_to_netcdf"
@@ -458,6 +398,7 @@ async def test_run_shell_rejects_python_outside_aero_agent(monkeypatch, tmp_path
     from aero.toolbox import builtin_tools
 
     base_bin = tmp_path / "miniconda3" / "bin"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(tmp_path / "runtime"))
     base_bin.mkdir(parents=True)
     python = base_bin / "python"
     python.write_text("#!/bin/sh\n")
@@ -479,6 +420,7 @@ async def test_run_shell_rejects_absolute_system_python(monkeypatch, tmp_path):
     from aero.toolbox import builtin_tools
 
     system_bin = tmp_path / "usr" / "bin"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(tmp_path / "runtime"))
     system_bin.mkdir(parents=True)
     python = system_bin / "python3"
     python.write_text("#!/bin/sh\n")
@@ -499,7 +441,8 @@ async def test_run_shell_allows_python_inside_aero_agent(monkeypatch, tmp_path):
     from aero.agent.runtime import ExecutionResult, Runtime
     from aero.toolbox import builtin_tools
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     env_bin = root / "envs" / "aero-agent" / "bin"
     env_bin.mkdir(parents=True)
     python = env_bin / "python"
@@ -532,9 +475,22 @@ async def test_run_shell_allows_python_inside_aero_agent(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_shell_truncates_install_output_more_aggressively(monkeypatch):
+async def test_run_shell_truncates_install_output_more_aggressively(
+    monkeypatch, tmp_path
+):
     from aero.agent.runtime import ExecutionResult, Runtime
     from aero.toolbox import builtin_tools
+
+    root = tmp_path / "runtime"
+    env_bin = root / "envs" / "aero-agent" / "bin"
+    env_bin.mkdir(parents=True)
+    python = env_bin / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    pip = env_bin / "pip"
+    pip.write_text("#!/bin/sh\n")
+    pip.chmod(0o755)
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
 
     async def fake_run_subprocess_streaming(
         self,
@@ -567,9 +523,17 @@ async def test_run_shell_truncates_install_output_more_aggressively(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_run_shell_keeps_larger_non_install_output(monkeypatch):
+async def test_run_shell_keeps_larger_non_install_output(monkeypatch, tmp_path):
     from aero.agent.runtime import ExecutionResult, Runtime
     from aero.toolbox import builtin_tools
+
+    root = tmp_path / "runtime"
+    env_bin = root / "envs" / "aero-agent" / "bin"
+    env_bin.mkdir(parents=True)
+    python = env_bin / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
 
     async def fake_run_subprocess_streaming(
         self,
@@ -793,6 +757,13 @@ async def test_run_shell_uses_project_root_for_missing_workdir(monkeypatch, tmp_
     from aero.toolbox import builtin_tools
 
     project = tmp_path / "project"
+    root = tmp_path / "runtime"
+    env_bin = root / "envs" / "aero-agent" / "bin"
+    env_bin.mkdir(parents=True)
+    python = env_bin / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     (project / "src" / "aero").mkdir(parents=True)
     (project / "pyproject.toml").write_text("[project]\nname='test'\n")
     monkeypatch.chdir(project)

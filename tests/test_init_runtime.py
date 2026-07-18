@@ -1,82 +1,53 @@
-"""Tests for interactive runtime setup during ``aero init``."""
+"""Tests for Aero's private Micromamba runtime."""
 
+import io
 import subprocess
+import tarfile
 from pathlib import Path
 
 from aero.cli import init_runtime
 
 
-def completed(command: list[str], returncode: int = 0) -> subprocess.CompletedProcess[str]:
-    return subprocess.CompletedProcess(command, returncode, stdout="", stderr="")
+def completed(command: list[str], returncode: int = 0, stdout: str = ""):
+    return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr="")
 
 
-def test_setup_runtime_uses_existing_conda_and_installs_common_packages(
-    monkeypatch, tmp_path, capsys
-):
-    root = tmp_path / "miniconda3"
-    conda = root / "bin" / "conda"
-    env_bin = root / "envs" / "aero-agent" / "bin"
-    conda.parent.mkdir(parents=True)
-    conda.write_text("")
-    answers = iter(("y",))
+def configure_runtime(monkeypatch, tmp_path: Path) -> tuple[Path, Path, Path]:
+    root = tmp_path / "aero-home" / "runtime"
+    micromamba = root / "bin" / "micromamba"
+    env = root / "envs" / "aero-agent"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
+    return root, micromamba, env
+
+
+def test_setup_runtime_creates_private_python_312_environment(monkeypatch, tmp_path):
+    root, micromamba, env = configure_runtime(monkeypatch, tmp_path)
+    micromamba.parent.mkdir(parents=True)
+    micromamba.write_text("")
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], *, timeout: int):
         calls.append(command)
-        if command[:3] == [str(conda), "create", "-n"]:
-            env_bin.mkdir(parents=True)
-        elif command[:3] == [str(conda), "install", "-n"]:
-            (env_bin / "mamba").write_text("")
+        (env / "bin").mkdir(parents=True, exist_ok=True)
+        (env / "bin" / "python").write_text("")
         return completed(command)
 
-    monkeypatch.setattr(init_runtime, "find_conda", lambda: conda)
     monkeypatch.setattr(init_runtime, "_run", fake_run)
-    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
 
     assert init_runtime.setup_runtime() is True
-    assert calls[0][:4] == [str(conda), "create", "-n", "aero-agent"]
+    assert calls[0][:3] == [str(micromamba), "create", "--yes"]
+    assert ["--root-prefix", str(root)] == calls[0][3:5]
+    assert ["--prefix", str(env)] == calls[0][5:7]
     assert "python=3.12" in calls[0]
-    assert calls[1][:4] == [str(conda), "install", "-n", "aero-agent"]
-    assert Path(calls[2][0]).resolve() == (env_bin / "mamba").resolve()
-    assert calls[2][1:3] == ["env", "update"]
-    assert str(init_runtime.CONDA_ENVIRONMENT_FILE) in calls[2]
-    assert Path(calls[3][0]).resolve() == (env_bin / "python").resolve()
-    assert calls[3][1:4] == ["-m", "pip", "install"]
-    assert str(init_runtime.PIP_REQUIREMENTS_FILE) in calls[3]
-    assert Path(calls[4][0]).resolve() == (env_bin / "mplfonts").resolve()
-    assert calls[4][1:] == ["init"]
-    assert Path(calls[5][0]).resolve() == (env_bin / "mplfonts").resolve()
-    assert calls[5][1:] == ["updaterc"]
-    output = capsys.readouterr().out
-    assert "科学计算常用包" in output
-    assert "environment.yaml" in output
-    assert "env-requirements.txt" in output
-    assert "libnetcdf" in output
-    assert "mplfonts" in output
-    assert "cnmaps" in output
-    assert "Matplotlib 中文字体已初始化" in output
 
 
-def test_install_common_packages_fails_when_mplfonts_init_fails(monkeypatch, tmp_path):
-    root = tmp_path / "miniconda3"
-    conda = root / "bin" / "conda"
-    env_path = root / "envs" / "aero-agent"
-    (env_path / "bin").mkdir(parents=True)
-    calls: list[list[str]] = []
-
-    def fake_run(command: list[str], *, timeout: int):
-        calls.append(command)
-        return completed(command, returncode=1 if command[-1:] == ["init"] else 0)
-
-    monkeypatch.setattr(init_runtime, "_run", fake_run)
-
-    assert init_runtime.install_common_packages(conda) is False
-    assert Path(calls[-1][0]).resolve() == (env_path / "bin" / "mplfonts").resolve()
-    assert calls[-1][1:] == ["init"]
-
-
-def test_initialize_mplfonts_persists_configuration_after_init(monkeypatch, tmp_path):
-    env_path = tmp_path / "aero-agent"
+def test_setup_runtime_full_installs_conda_then_pip_packages(monkeypatch, tmp_path):
+    root, micromamba, env = configure_runtime(monkeypatch, tmp_path)
+    micromamba.parent.mkdir(parents=True)
+    micromamba.write_text("")
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("")
+    (env / "bin" / "mplfonts").write_text("")
     calls: list[list[str]] = []
 
     def fake_run(command: list[str], *, timeout: int):
@@ -85,57 +56,70 @@ def test_initialize_mplfonts_persists_configuration_after_init(monkeypatch, tmp_
 
     monkeypatch.setattr(init_runtime, "_run", fake_run)
 
-    assert init_runtime.initialize_mplfonts(env_path) is True
-    assert [command[1] for command in calls] == ["init", "updaterc"]
+    assert init_runtime.setup_runtime(full=True) is True
+    assert calls[0][:3] == [str(micromamba), "env", "update"]
+    assert str(init_runtime.CONDA_ENVIRONMENT_FILE) in calls[0]
+    assert calls[1][:4] == [str(env / "bin" / "python"), "-m", "pip", "install"]
+    assert str(init_runtime.PIP_REQUIREMENTS_FILE) in calls[1]
+    assert calls[2][-1] == "init"
+    assert calls[3][-1] == "updaterc"
 
 
-def test_common_package_files_separate_conda_and_pip_packages():
-    conda_packages = init_runtime._conda_packages()
-    pip_packages = init_runtime._pip_packages()
+def test_ensure_micromamba_extracts_managed_binary(monkeypatch, tmp_path):
+    _root, micromamba, _env = configure_runtime(monkeypatch, tmp_path)
 
-    assert "libnetcdf" in conda_packages
-    assert "cartopy" in conda_packages
-    assert "mplfonts" not in conda_packages
-    assert "cnmaps" not in conda_packages
-    assert pip_packages == ("mplfonts", "cnmaps")
+    def fake_urlretrieve(_url: str, destination: Path):
+        payload = b"#!/bin/sh\n"
+        with tarfile.open(destination, "w:bz2") as archive:
+            info = tarfile.TarInfo("bin/micromamba")
+            info.size = len(payload)
+            archive.addfile(info, io.BytesIO(payload))
+
+    monkeypatch.setattr(init_runtime.urllib.request, "urlretrieve", fake_urlretrieve)
+
+    assert init_runtime.ensure_micromamba() == micromamba
+    assert micromamba.read_bytes() == b"#!/bin/sh\n"
+    assert micromamba.stat().st_mode & 0o111
+
+
+def test_clean_runtime_only_removes_private_runtime(monkeypatch, tmp_path):
+    root, _micromamba, _env = configure_runtime(monkeypatch, tmp_path)
+    project = tmp_path / "project"
+    (root / "envs").mkdir(parents=True)
+    project.mkdir()
+    (project / "aero.yaml").write_text("output: {}\n")
+
+    assert init_runtime.clean_runtime(assume_yes=True) is True
+    assert not root.exists()
+    assert (project / "aero.yaml").exists()
+
+
+def test_runtime_diagnostics_requires_python_312(monkeypatch, tmp_path):
+    _root, micromamba, env = configure_runtime(monkeypatch, tmp_path)
+    micromamba.parent.mkdir(parents=True)
+    micromamba.write_text("")
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("")
+    monkeypatch.setattr(
+        init_runtime,
+        "_run",
+        lambda command, timeout: completed(command, stdout="3.12.9\n"),
+    )
+
+    healthy, checks = init_runtime.runtime_diagnostics()
+
+    assert healthy is True
+    assert checks[-1] == ("Python 版本", True, "3.12.9")
+
+
+def test_common_package_files_keep_cnmaps_pip_only():
+    assert "python=3.12" in init_runtime._conda_packages()
+    assert "cnmaps" not in init_runtime._conda_packages()
+    assert init_runtime._pip_packages() == ("mplfonts", "cnmaps")
 
 
 def test_conda_helper_documents_python_312_and_pip_only_cnmaps():
-    skill_text = (
-        Path("src/aero/skills/builtin/conda-helper/SKILL.md").read_text()
-    )
-
+    skill_text = Path("src/aero/skills/builtin/conda-helper/SKILL.md").read_text()
     assert "python=3.12" in skill_text
     assert "`cnmaps` is pip-only" in skill_text
     assert "Never install `cnmaps` with conda or mamba" in skill_text
-    assert "python -m pip install -U cnmaps" in skill_text
-
-
-def test_setup_runtime_can_skip_miniconda_install(monkeypatch):
-    monkeypatch.setattr(init_runtime, "find_conda", lambda: None)
-    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
-
-    assert init_runtime.setup_runtime() is False
-
-
-def test_install_miniconda_uses_selected_path(monkeypatch, tmp_path):
-    install_path = tmp_path / "conda"
-
-    def fake_urlretrieve(_url: str, destination):
-        destination.write_text("#!/bin/bash\n")
-
-    def fake_run(command: list[str], *, timeout: int):
-        conda = install_path / "bin" / "conda"
-        conda.parent.mkdir(parents=True)
-        conda.write_text("")
-        return completed(command)
-
-    monkeypatch.setattr(init_runtime.urllib.request, "urlretrieve", fake_urlretrieve)
-    monkeypatch.setattr(init_runtime, "_run", fake_run)
-    monkeypatch.setattr(
-        init_runtime,
-        "_miniconda_installer_url",
-        lambda: "https://example.test/miniconda.sh",
-    )
-
-    assert init_runtime.install_miniconda(install_path) == install_path / "bin" / "conda"

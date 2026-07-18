@@ -87,7 +87,6 @@ def test_init_operates_on_current_directory(monkeypatch, tmp_path):
     from aero.cli.main import _init
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr("aero.cli.init_runtime.setup_runtime", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: pytest.fail("unexpected init prompt"))
 
     _init()

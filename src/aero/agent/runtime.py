@@ -14,6 +14,7 @@ import structlog
 
 from aero.core.debug_log import debug_exception, debug_log
 from aero.core.network_region import apply_package_mirrors
+from aero.core.runtime_paths import runtime_bin_path, runtime_root
 
 logger = structlog.get_logger()
 
@@ -383,13 +384,12 @@ class Runtime:
         env.pop("PYTHONHOME", None)
         env.pop("PIXI_IN_SHELL", None)
         path_parts: list[str] = []
-        for root in _conda_roots(env):
-            tool_bin = root / "envs" / "aero-agent" / "bin"
-            if tool_bin.exists():
-                path_parts.append(str(tool_bin))
-            base_bin = root / "bin"
-            if base_bin.exists():
-                path_parts.append(str(base_bin))
+        tool_bin = runtime_bin_path()
+        if tool_bin.exists():
+            path_parts.append(str(tool_bin))
+        manager_bin = runtime_root() / "bin"
+        if manager_bin.exists():
+            path_parts.append(str(manager_bin))
         if path_parts:
             existing = env.get("PATH", "")
             env["PATH"] = os.pathsep.join([*path_parts, existing] if existing else path_parts)
@@ -411,28 +411,5 @@ def sys_executable() -> str:
 
 
 def _conda_roots(env: dict[str, str]) -> list[Path]:
-    roots: list[Path] = []
-    for key in ("CONDA_PREFIX", "MAMBA_PREFIX"):
-        value = env.get(key)
-        if value:
-            prefix = Path(value)
-            roots.append(prefix.parent.parent if prefix.parent.name == "envs" else prefix)
-    conda_exe = env.get("CONDA_EXE") or env.get("MAMBA_EXE")
-    if conda_exe:
-        roots.append(Path(conda_exe).resolve().parent.parent)
-    roots.extend(
-        [
-            Path.home() / "miniconda3",
-            Path.home() / "anaconda3",
-            Path.home() / "mambaforge",
-            Path.home() / "micromamba",
-        ]
-    )
-    unique: list[Path] = []
-    seen: set[str] = set()
-    for root in roots:
-        key = str(root)
-        if key not in seen:
-            seen.add(key)
-            unique.append(root)
-    return unique
+    """Compatibility helper returning only Aero-owned runtime roots."""
+    return [runtime_root()]

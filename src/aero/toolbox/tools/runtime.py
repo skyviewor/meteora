@@ -9,8 +9,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from aero.agent.runtime import _conda_roots
 from aero.core.network_region import detect_network_region
+from aero.core.runtime_paths import runtime_bin_path, runtime_env_path, runtime_root
 from aero.toolbox.registry import register_tool
 from aero.toolbox.runtime_manager import get_runtime_tool_manager
 
@@ -18,10 +18,10 @@ from aero.toolbox.runtime_manager import get_runtime_tool_manager
 @register_tool(
     name="ensure_runtime_tools",
     description=(
-        "按 conda-helper 流程安装缺失的运行时命令行工具到统一 aero-agent conda 环境。"
+        "安装缺失的运行时命令行工具到 Aero 私有科学计算环境。"
         "当 cdo、grib_to_netcdf、ncrcat、ncks、ncdump 等命令不存在时调用；"
-        "优先使用 aero-agent 内的 mamba 加速依赖解析；如果 mamba 不存在，会先把 mamba 安装到 aero-agent。"
-        "不要改用 Python 脚本绕过缺失工具。工具会创建/更新 aero-agent、软链接命令到 conda base bin，并验证命令可用。"
+        "环境由 Aero 自带的 Micromamba 管理，不使用或修改用户的 Conda 环境。"
+        "不要改用 Python 脚本绕过缺失工具；安装后会验证命令可用。"
     ),
     parameters={
         "type": "object",
@@ -73,14 +73,12 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
     if conda is None:
         return {
             "status": "error",
-            "message": "未找到 conda，无法创建 aero-agent 运行时环境。",
+            "message": "Aero 私有运行时尚未安装，请先运行 aero setup。",
             "missing_tools": missing,
             "verified": verified,
         }
 
-    root = manager.conda_root_from_executable(conda)
-    env_bin = root / "envs" / "aero-agent" / "bin"
-    base_bin = root / "bin"
+    env_bin = runtime_bin_path()
 
     emit_progress("正在检查 aero-agent 运行时环境")
     env_exists = await manager.conda_env_exists_async(conda, env)
@@ -89,13 +87,15 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
         env_create_cmd = [
             conda,
             "create",
-            "-n",
-            "aero-agent",
-            "-c",
+            "--yes",
+            "--root-prefix",
+            str(runtime_root()),
+            "--prefix",
+            str(runtime_env_path()),
+            "--channel",
             "conda-forge",
             "--override-channels",
             "python=3.12",
-            "-y",
         ]
         env_create_command = " ".join(env_create_cmd)
         emit_progress(f"正在创建 aero-agent 环境：{env_create_command}")
@@ -123,79 +123,28 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
             }
         env = Runtime._build_exec_env()
 
-    emit_progress(f"正在激活 aero-agent 环境：{env_bin}")
-
-    mamba_install_command = None
-    mamba_install_error = None
-    package_manager = str(env_bin / "mamba") if (env_bin / "mamba").exists() else None
-    if package_manager is None:
-        emit_progress("aero-agent 中未找到 mamba，正在安装 mamba 以加速依赖解析")
-        mamba_install_cmd = [
-            conda,
-            "install",
-            "-n",
-            "aero-agent",
-            "-c",
-            "conda-forge",
-            "--override-channels",
-            "mamba",
-            "-y",
-        ]
-        mamba_install_command = " ".join(mamba_install_cmd)
-        try:
-            mamba_install = await manager.run_command_async(mamba_install_cmd, env=env, timeout=900)
-        except subprocess.TimeoutExpired:
-            mamba_install_error = "mamba 安装超时。"
-        except OSError as exc:
-            mamba_install_error = f"mamba 安装命令启动失败：{exc}"
-        else:
-            if mamba_install.returncode != 0:
-                mamba_install_error = "mamba 安装失败。"
-            else:
-                env = Runtime._build_exec_env()
-                if (env_bin / "mamba").exists():
-                    package_manager = str(env_bin / "mamba")
-        if package_manager is None:
-            if mamba_install_error is None:
-                mamba_install_error = "mamba 安装完成但仍未找到 mamba 命令。"
-            emit_progress("mamba 不可用，改用 conda 更新 aero-agent")
-            package_manager = conda
+    emit_progress(f"正在使用 Aero 私有环境：{env_bin}")
+    package_manager = conda
 
     packages: list[str] = []
-    linked_tools: list[str] = []
     for tool in requested:
-        package, package_tools = manager.packages[tool]
+        package, _package_tools = manager.packages[tool]
         if package not in packages:
             packages.append(package)
-        for package_tool in package_tools:
-            if package_tool not in linked_tools:
-                linked_tools.append(package_tool)
 
-    install_cmd = (
-        [
-            package_manager,
-            "install",
-            "-p",
-            str(env_bin.parent),
-            "-c",
-            "conda-forge",
-            "--override-channels",
-            *packages,
-            "-y",
-        ]
-        if Path(package_manager).name == "mamba"
-        else [
-            package_manager,
-            "install",
-            "-n",
-            "aero-agent",
-            "-c",
-            "conda-forge",
-            "--override-channels",
-            *packages,
-            "-y",
-        ]
-    )
+    install_cmd = [
+        package_manager,
+        "install",
+        "--yes",
+        "--root-prefix",
+        str(runtime_root()),
+        "--prefix",
+        str(runtime_env_path()),
+        "--channel",
+        "conda-forge",
+        "--override-channels",
+        *packages,
+    ]
     emit_progress(f"正在安装运行时工具：{' '.join(install_cmd)}")
     try:
         install = await manager.run_command_async(install_cmd, env=env, timeout=900)
@@ -220,17 +169,7 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
             "stderr": install.stderr[-8000:],
         }
 
-    base_bin.mkdir(parents=True, exist_ok=True)
     symlinks = []
-    emit_progress("正在软链接运行时工具到 PATH")
-    for tool in linked_tools:
-        src = env_bin / tool
-        dest = base_bin / tool
-        if src.exists():
-            if dest.exists() or dest.is_symlink():
-                dest.unlink()
-            dest.symlink_to(src)
-            symlinks.append({"tool": tool, "path": str(dest), "target": str(src)})
 
     verify_env = Runtime._build_exec_env()
     verified = []
@@ -257,8 +196,8 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
         "environment": "aero-agent",
         "package_manager": package_manager,
         "env_create_command": env_create_command,
-        "mamba_install_command": mamba_install_command,
-        "mamba_install_error": mamba_install_error,
+        "mamba_install_command": None,
+        "mamba_install_error": None,
         "packages": packages,
         "requested_tools": requested,
         "verified": verified,
@@ -272,7 +211,7 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
     description=(
         "执行 shell 命令。适合调用成熟 CLI 工具下载远程文件或处理本地文件；"
         "命令默认直接在用户当前工作根目录执行，不要猜测目录或在命令前添加 cd。"
-        "运行时会自动把统一 conda 环境 ~/miniconda3/envs/aero-agent/bin 放到 PATH 前面，"
+        "运行时会自动把 Aero 私有环境 ~/.aero/runtime/envs/aero-agent/bin 放到 PATH 前面，"
         "通常不需要手动 conda activate。"
         "凡是通过 run_shell 执行 python/python3/pip/pip3/python -m pip，都必须解析到 aero-agent；"
         "不要用 base、系统 Python 或绝对路径绕过该环境。"
@@ -559,7 +498,7 @@ def _python_runtime_error(command: str, env: dict[str, str]) -> dict | None:
     python_tokens = _python_command_tokens(command)
     if not python_tokens:
         return None
-    env_bins = [(root / "envs" / "aero-agent" / "bin").resolve() for root in _conda_roots(env)]
+    env_bins = [runtime_bin_path().resolve()]
     failures: list[dict[str, str]] = []
     for token in python_tokens:
         executable = _resolve_python_executable(token, env)

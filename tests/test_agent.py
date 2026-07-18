@@ -863,7 +863,8 @@ def test_ensure_runtime_tools_confirmation_skipped_when_ready(monkeypatch, tmp_p
     from aero.agent import loop
     from aero.agent.runtime import Runtime
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     env_bin = root / "envs" / "aero-agent" / "bin"
     env_bin.mkdir(parents=True)
     for tool in ("cdo", "grib_to_netcdf"):
@@ -890,7 +891,8 @@ def test_ensure_runtime_tools_confirmation_required_when_missing(monkeypatch, tm
     from aero.agent import loop
     from aero.agent.runtime import Runtime
 
-    root = tmp_path / "miniconda3"
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     env_bin = root / "envs" / "aero-agent" / "bin"
     env_bin.mkdir(parents=True)
     cdo = env_bin / "cdo"

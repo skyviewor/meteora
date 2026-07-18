@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Aerolytica 是面向气象与地球科学研究的 AI Agent IDE。">
+    <meta name="theme-color" content="#080b0f">
+    <title>Aerolytica | 气象科研 AI Agent IDE</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="#top" aria-label="Aerolytica 首页">
+        <span class="brand-mark" aria-hidden="true">A/</span>
+        <span>Aerolytica</span>
+      </a>
+      <nav aria-label="主导航">
+        <a href="#workflow">工作流</a>
+        <a href="#capabilities">能力</a>
+        <a href="#download">下载</a>
+        <a href="https://github.com/skyviewor/Aerolytica" target="_blank" rel="noreferrer">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-shade" aria-hidden="true"></div>
+        <div class="hero-content">
+          <p class="eyebrow"><span class="status-dot"></span> Open source research agent</p>
+          <h1 id="hero-title">Aerolytica</h1>
+          <p class="hero-lead">面向气象与地球科学研究的 AI Agent IDE</p>
+          <p class="hero-copy">
+            从数据获取、可控实验到研究记忆与论文交付，在同一个项目目录里完成完整科研工作流。
+          </p>
+
+          <div class="install-shell" aria-label="一键安装命令">
+            <span class="shell-prompt" aria-hidden="true">$</span>
+            <code id="install-command">curl -LsSf https://aero.skyviewor.com/download/install.sh | sh</code>
+            <button class="icon-button" id="copy-install" type="button" aria-label="复制安装命令" title="复制安装命令">
+              <i data-lucide="copy" aria-hidden="true"></i>
+            </button>
+          </div>
+
+          <div class="hero-actions">
+            <a class="button primary" href="#download">
+              <i data-lucide="download" aria-hidden="true"></i>
+              获取 Aerolytica
+            </a>
+            <a class="button secondary" href="https://github.com/skyviewor/Aerolytica" target="_blank" rel="noreferrer">
+              <i data-lucide="github" aria-hidden="true"></i>
+              查看源码
+            </a>
+          </div>
+          <p class="hero-meta">macOS / Linux · Python 3.12 · Apache-2.0</p>
+        </div>
+
+        <div class="hero-data-label" aria-label="背景图说明">
+          <span>GLOBAL ANALYSIS / WESTERN PACIFIC</span>
+          <strong>Atmospheric data field</strong>
+        </div>
+      </section>
+
+      <section class="signal-strip" aria-label="主要能力概览">
+        <span>ERA5</span><span>MERRA-2</span><span>CAMS</span><span>GFS / GEFS</span>
+        <span>IFS / AIFS</span><span>JRA</span><span>NOAA</span><span>Himawari</span>
+      </section>
+
+      <section class="section workflow" id="workflow">
+        <div class="section-heading">
+          <p class="section-index">01 / RESEARCH LOOP</p>
+          <h2>一条持续、可恢复的科研链路</h2>
+          <p>Agent 不只回答问题，而是围绕真实项目目录组织数据、脚本、实验和成果。</p>
+        </div>
+
+        <div class="workflow-track">
+          <article>
+            <span class="step-number">01</span>
+            <h3>获取数据</h3>
+            <p>理解时间、区域、层次与变量，查询并下载专业气象数据。</p>
+          </article>
+          <article>
+            <span class="step-number">02</span>
+            <h3>运行实验</h3>
+            <p>隔离脚本、图件和计划，在有边界的上下文中测试不同方案。</p>
+          </article>
+          <article>
+            <span class="step-number">03</span>
+            <h3>沉淀结论</h3>
+            <p>将确认过的判断、依据和限制记录为可复用的研究备忘。</p>
+          </article>
+          <article>
+            <span class="step-number">04</span>
+            <h3>交付论文</h3>
+            <p>版本化 Markdown 正文，并导出 LaTeX、Word 或 PDF。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section terminal-band" aria-labelledby="terminal-title">
+        <div class="terminal-copy">
+          <p class="section-index">PROJECT-BOUND AGENT</p>
+          <h2 id="terminal-title">终端里，项目内，研究不中断</h2>
+          <p>
+            启动目录就是项目边界。会话、实验、检查点、图片和论文版本都围绕当前工作组织，退出后也能继续。
+          </p>
+          <ul class="check-list">
+            <li><i data-lucide="check" aria-hidden="true"></i> Textual TUI 与流式执行进度</li>
+            <li><i data-lucide="check" aria-hidden="true"></i> 主流程与实验独立检查点</li>
+            <li><i data-lucide="check" aria-hidden="true"></i> 图片在对话内直接预览</li>
+          </ul>
+        </div>
+
+        <div class="terminal-window" aria-label="Aerolytica 终端示例">
+          <div class="terminal-bar">
+            <span></span><span></span><span></span>
+            <strong>aero chat</strong>
+          </div>
+          <div class="terminal-body">
+            <p><b class="user-label">你</b> 下载 2024 年 7 月华北 ERA5 2 米气温，画月平均图</p>
+            <p><b class="aero-label">Aero</b> 已解析时间、区域和变量，正在提交数据请求。</p>
+            <div class="terminal-progress"><span></span></div>
+            <p class="terminal-muted">远程数据准备完成 · 42.8 MB · 支持断点续传</p>
+            <p><b class="aero-label">Aero</b> 图件已生成并加入当前实验。</p>
+            <p class="terminal-path">figures/era5_t2m_north_china_202407.png</p>
+            <p class="terminal-cursor">_</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="output-showcase" aria-labelledby="output-title">
+        <div class="output-copy">
+          <p class="section-index">REAL OUTPUT / CAMS</p>
+          <h2 id="output-title">从请求到可交付图件</h2>
+          <p>
+            Aerolytica 能继续检查下载结果、修正单位与色标，并把最终图片直接嵌入对话和实验目录。
+          </p>
+          <dl>
+            <div><dt>Dataset</dt><dd>CAMS global forecast</dd></div>
+            <div><dt>Variable</dt><dd>PM2.5 surface concentration</dd></div>
+            <div><dt>Domain</dt><dd>East Asia · 0.4° grid</dd></div>
+          </dl>
+        </div>
+        <figure>
+          <img src="assets/cams-pm25-east-asia.png" alt="Aerolytica 生成的东亚 CAMS PM2.5 浓度图" loading="lazy">
+          <figcaption>由 Aerolytica 数据工作流生成的实际科研图件</figcaption>
+        </figure>
+      </section>
+
+      <section class="section capabilities" id="capabilities">
+        <div class="section-heading">
+          <p class="section-index">02 / CAPABILITIES</p>
+          <h2>为科研过程设计，不是通用聊天壳</h2>
+        </div>
+
+        <div class="capability-grid">
+          <article>
+            <i data-lucide="database" aria-hidden="true"></i>
+            <h3>专业数据适配</h3>
+            <p>覆盖再分析、预报、地面观测、卫星和降水产品，并校验数据集真实参数。</p>
+          </article>
+          <article>
+            <i data-lucide="flask-conical" aria-hidden="true"></i>
+            <h3>可控实验空间</h3>
+            <p>每个实验拥有独立目录、上下文、检查点和最终报告。</p>
+          </article>
+          <article>
+            <i data-lucide="rotate-ccw" aria-hidden="true"></i>
+            <h3>安全恢复</h3>
+            <p>查看变化并恢复阶段状态，恢复前自动保存保护记录。</p>
+          </article>
+          <article>
+            <i data-lucide="book-open" aria-hidden="true"></i>
+            <h3>资料与研究记忆</h3>
+            <p>联网查询、检索文献、阅读 PDF，并把重要结论沉淀为项目备忘。</p>
+          </article>
+          <article>
+            <i data-lucide="file-text" aria-hidden="true"></i>
+            <h3>论文版本控制</h3>
+            <p>对正文保存版本、逐行比较和回滚，保留本地插图引用。</p>
+          </article>
+          <article>
+            <i data-lucide="blocks" aria-hidden="true"></i>
+            <h3>开放扩展体系</h3>
+            <p>通过数据适配器、工具和 Skills 扩展新的数据源与研究方法。</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section download" id="download">
+        <div class="download-intro">
+          <p class="section-index">03 / INSTALL</p>
+          <h2>下载并开始研究</h2>
+          <p>
+            安装器使用独立的 uv CLI 环境与 Aero 私有 Micromamba 运行时，不修改系统 Python 或已有 Conda。
+          </p>
+        </div>
+
+        <div class="download-panel">
+          <div class="recommended-download">
+            <span class="recommend-label">为此设备推荐</span>
+            <strong id="platform-name">自动检测平台</strong>
+            <a class="button primary" id="platform-download" href="https://aero.skyviewor.com/download/install.sh">
+              <i data-lucide="download" aria-hidden="true"></i>
+              <span id="platform-download-label">使用安装脚本</span>
+            </a>
+          </div>
+
+          <div class="package-list" aria-label="全部平台安装包">
+            <a href="https://aero.skyviewor.com/download/aero-macos-arm64.tar.gz">
+              <span>macOS</span><strong>Apple Silicon</strong><code>arm64</code>
+            </a>
+            <a href="https://aero.skyviewor.com/download/aero-macos-x86_64.tar.gz">
+              <span>macOS</span><strong>Intel</strong><code>x86_64</code>
+            </a>
+            <a href="https://aero.skyviewor.com/download/aero-linux-x86_64.tar.gz">
+              <span>Linux</span><strong>64-bit</strong><code>x86_64</code>
+            </a>
+            <a href="https://aero.skyviewor.com/download/aero-linux-aarch64.tar.gz">
+              <span>Linux</span><strong>ARM</strong><code>aarch64</code>
+            </a>
+          </div>
+        </div>
+
+        <div class="quickstart">
+          <div><span>1</span><code>aero init</code><small>初始化当前研究目录</small></div>
+          <div><span>2</span><code>aero chat</code><small>启动科研 Agent</small></div>
+          <div><span>3</span><code>aero doctor</code><small>检查私有运行时</small></div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <a class="brand" href="#top"><span class="brand-mark">A/</span><span>Aerolytica</span></a>
+      <p>Built for atmospheric science, with an open workflow.</p>
+      <div>
+        <a href="https://github.com/skyviewor/Aerolytica">Source</a>
+        <a href="https://github.com/skyviewor/Aerolytica/blob/main/LICENSE">Apache-2.0</a>
+      </div>
+    </footer>
+
+    <div class="toast" id="copy-toast" role="status" aria-live="polite">安装命令已复制</div>
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -13,7 +13,7 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
-from aero.agent.runtime import _conda_roots
+from aero.core.runtime_paths import micromamba_path, runtime_bin_path, runtime_env_path
 
 RUNTIME_TOOL_PACKAGES = {
     "pandoc": ("pandoc", ["pandoc"]),
@@ -168,9 +168,7 @@ class RuntimeToolManager:
         tools: list[str],
         env: dict[str, str],
     ) -> tuple[bool, list[str], list[dict]]:
-        env_bins = [
-            (root / "envs" / "aero-agent" / "bin").resolve() for root in _conda_roots(env)
-        ]
+        env_bins = [runtime_bin_path().resolve()]
         missing: list[str] = []
         verified: list[dict] = []
         for tool in tools:
@@ -187,27 +185,15 @@ class RuntimeToolManager:
         return not missing, missing, verified
 
     def find_conda_executable(self, env: dict[str, str]) -> str | None:
-        value = env.get("CONDA_EXE")
-        if value and Path(value).exists():
-            return value
-        return shutil.which("conda", path=env.get("PATH"))
+        executable = micromamba_path()
+        return str(executable) if executable.exists() else None
 
     @staticmethod
     def conda_root_from_executable(executable: str) -> Path:
-        path = Path(executable).resolve()
-        return path.parent.parent if path.parent.name == "bin" else Path.home() / "miniconda3"
+        return micromamba_path().parent.parent
 
     def conda_env_exists(self, conda: str, env: dict[str, str]) -> bool:
-        try:
-            result = self.command_runner([conda, "env", "list"], env=env, timeout=120)
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        if result.returncode != 0:
-            return False
-        return any(
-            line.split() and line.split()[0] == "aero-agent"
-            for line in result.stdout.splitlines()
-        )
+        return (runtime_env_path() / "conda-meta").is_dir()
 
     async def conda_env_exists_async(self, conda: str, env: dict[str, str]) -> bool:
         return await asyncio.to_thread(self.conda_env_exists, conda, env)

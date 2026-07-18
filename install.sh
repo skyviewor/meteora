@@ -1,177 +1,108 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
-# ── Colors ──────────────────────────────────────────────────────────────
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-info()  { echo -e "  ${CYAN}[*]${NC} $*"; }
-ok()    { echo -e "  ${GREEN}[✓]${NC} $*"; }
-warn()  { echo -e "  ${YELLOW}[!]${NC} $*"; }
-err()   { echo -e "  ${RED}[✗]${NC} $*"; }
-banner(){ echo -e "${BOLD}${CYAN}$*${NC}"; }
+info() { printf "  ${CYAN}[*]${NC} %s\n" "$*"; }
+ok() { printf "  ${GREEN}[OK]${NC} %s\n" "$*"; }
+fail() { printf "  ${RED}[X]${NC} %s\n" "$*" >&2; exit 1; }
 
-# ── Config ──────────────────────────────────────────────────────────────
-AERO_REPO="${AERO_REPO:-https://github.com/skyviewor/aero.git}"
-MINICONDA_DIR="${MINICONDA_DIR:-$HOME/miniconda3}"
-PYPI_CHINA_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
-CONDA_CHINA_CHANNEL_ALIAS="https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud"
-
-detect_network_region() {
-    case "${AERO_NETWORK_REGION:-}" in
-        cn|china|mainland|mainland_china) echo "mainland_china"; return ;;
-        global|international|overseas|non_cn) echo "global"; return ;;
-    esac
-    local country timezone
-    country="$(curl -fsS --connect-timeout 2 --max-time 3 https://api.country.is/ 2>/dev/null \
-        | sed -n 's/.*"country"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)"
-    if [ "$country" = "CN" ]; then
-        echo "mainland_china"
-        return
-    elif [ -n "$country" ]; then
-        echo "global"
-        return
-    fi
-    timezone="${TZ:-$(readlink /etc/localtime 2>/dev/null || true)}"
-    case "$timezone" in
-        *Asia/Shanghai|*Asia/Chongqing|*Asia/Harbin) echo "mainland_china" ;;
-        *) echo "global" ;;
-    esac
-}
-
-NETWORK_REGION="$(detect_network_region)"
-if [ "$NETWORK_REGION" = "mainland_china" ]; then
-    export PIP_INDEX_URL="${PIP_INDEX_URL:-$PYPI_CHINA_MIRROR}"
-    export CONDA_CHANNEL_ALIAS="${CONDA_CHANNEL_ALIAS:-$CONDA_CHINA_CHANNEL_ALIAS}"
-    export MAMBA_CHANNEL_ALIAS="${MAMBA_CHANNEL_ALIAS:-$CONDA_CHINA_CHANNEL_ALIAS}"
-fi
-
-
-banner ""
-banner "  Aero — 气象科研 AI Agent IDE"
-banner "  一键安装脚本"
-banner ""
-
-# ── Detect OS / arch ────────────────────────────────────────────────────
 OS="$(uname -s)"
 ARCH="$(uname -m)"
-case "$OS" in
-    Darwin)
-        CONDA_OS="MacOSX"
-        case "$ARCH" in
-            arm64|aarch64) CONDA_ARCH="arm64" ;;
-            x86_64)        CONDA_ARCH="x86_64" ;;
-            *) err "不支持的 macOS 架构: $ARCH"; exit 1 ;;
-        esac
-        ;;
-    Linux)
-        CONDA_OS="Linux"
-        case "$ARCH" in
-            aarch64) CONDA_ARCH="aarch64" ;;
-            x86_64)  CONDA_ARCH="x86_64" ;;
-            *) err "不支持的 Linux 架构: $ARCH"; exit 1 ;;
-        esac
-        ;;
-    *)
-        err "不支持的操作系统: $OS"
-        exit 1
+case "$OS:$ARCH" in
+    Darwin:arm64|Darwin:aarch64) ARCHIVE_FILE="aero-macos-arm64.tar.gz" ;;
+    Darwin:x86_64) ARCHIVE_FILE="aero-macos-x86_64.tar.gz" ;;
+    Linux:x86_64|Linux:amd64) ARCHIVE_FILE="aero-linux-x86_64.tar.gz" ;;
+    Linux:arm64|Linux:aarch64) ARCHIVE_FILE="aero-linux-aarch64.tar.gz" ;;
+    *) fail "不支持的平台: $OS / $ARCH" ;;
+esac
+
+AERO_DOWNLOAD_BASE="${AERO_DOWNLOAD_BASE:-https://aero.skyviewor.com/download}"
+AERO_PACKAGE_URL="$AERO_DOWNLOAD_BASE/$ARCHIVE_FILE"
+NETWORK_REGION="${AERO_NETWORK_REGION:-}"
+if [ -z "$NETWORK_REGION" ]; then
+    TIMEZONE="${TZ:-$(readlink /etc/localtime 2>/dev/null || true)}"
+    case "$TIMEZONE" in
+        *Asia/Shanghai|*Asia/Chongqing|*Asia/Harbin) NETWORK_REGION="mainland_china" ;;
+        *) NETWORK_REGION="global" ;;
+    esac
+fi
+case "$NETWORK_REGION" in
+    cn|china|mainland|mainland_china)
+        export UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        export PIP_INDEX_URL="${PIP_INDEX_URL:-$UV_DEFAULT_INDEX}"
         ;;
 esac
-info "检测到: ${CONDA_OS} / ${ARCH}"
-info "网络区域: ${NETWORK_REGION}"
 
-# ── Step 1: Ensure conda ────────────────────────────────────────────────
-banner ""
-banner "  Step 1/3: 检查 conda / Miniconda"
-banner ""
+printf "${BOLD}${CYAN}Aero - 气象科研 AI Agent IDE${NC}\n\n"
 
-CONDA_BIN=""
-if command -v conda &>/dev/null; then
-    CONDA_BIN="$(command -v conda)"
-    ok "已找到 conda: $CONDA_BIN"
-elif [ -f "$MINICONDA_DIR/bin/conda" ]; then
-    CONDA_BIN="$MINICONDA_DIR/bin/conda"
-    ok "已找到 Miniconda: $CONDA_BIN"
-else
-    warn "未找到 conda。开始安装 Miniconda..."
-
-    MINICONDA_OFFICIAL="https://repo.anaconda.com/miniconda/Miniconda3-latest-${CONDA_OS}-${CONDA_ARCH}.sh"
-    MINICONDA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-${CONDA_OS}-${CONDA_ARCH}.sh"
-    if [ "$NETWORK_REGION" = "mainland_china" ]; then
-        MINICONDA_URL="$MINICONDA_MIRROR"
-        MINICONDA_FALLBACK="$MINICONDA_OFFICIAL"
-    else
-        MINICONDA_URL="$MINICONDA_OFFICIAL"
-        MINICONDA_FALLBACK="$MINICONDA_MIRROR"
-    fi
-    info "下载: $MINICONDA_URL"
-    INSTALLER="/tmp/miniconda-$$.sh"
-    curl -fkL --progress-bar --connect-timeout 10 --max-time 300 --speed-limit 1000 --speed-time 15 "$MINICONDA_URL" -o "$INSTALLER" 2>&1 || {
-        warn "首选源下载失败，尝试备用源..."
-        curl -fkL --progress-bar "$MINICONDA_FALLBACK" -o "$INSTALLER" || {
-            err "Miniconda 下载失败，请手动安装 conda 后重试。"
-            rm -f "$INSTALLER"
-            exit 1
-        }
-    }
-    echo ""
-    bash "$INSTALLER" -b -p "$MINICONDA_DIR" || {
-        err "Miniconda 安装失败"
-        rm -f "$INSTALLER"
-        exit 1
-    }
-    rm -f "$INSTALLER"
-    CONDA_BIN="$MINICONDA_DIR/bin/conda"
-    if [ ! -f "$CONDA_BIN" ]; then
-        err "Miniconda 安装完成但未找到 conda: $CONDA_BIN"
-        exit 1
-    fi
-    ok "Miniconda 已安装: $MINICONDA_DIR"
+if ! command -v curl >/dev/null 2>&1; then
+    fail "安装需要 curl，请先安装后重试"
 fi
 
-# ── Step 2: Install aero ─────────────────────────────────────────────
-banner ""
-banner "  Step 2/3: 安装 Aero"
-banner ""
+if ! command -v uv >/dev/null 2>&1; then
+    info "安装 uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+    export PATH
+fi
+command -v uv >/dev/null 2>&1 || fail "uv 安装完成，但当前 shell 尚未找到 uv"
+ok "uv 已就绪: $(command -v uv)"
 
-TMP_DIR="/tmp/aero-$$"
-rm -rf "$TMP_DIR"
-info "克隆仓库: $AERO_REPO"
-git clone --progress "$AERO_REPO" "$TMP_DIR" 2>&1 || {
-    err "仓库克隆失败。请检查网络连接。"
-    rm -rf "$TMP_DIR"
-    exit 1
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aero-install.XXXXXX")"
+trap 'rm -rf "$TEMP_DIR"' EXIT HUP INT TERM
+ARCHIVE_PATH="$TEMP_DIR/$ARCHIVE_FILE"
+CHECKSUM_PATH="$ARCHIVE_PATH.sha256"
+
+info "下载 Aero 分发包: $AERO_PACKAGE_URL"
+curl -fL --retry 3 --connect-timeout 10 "$AERO_PACKAGE_URL" -o "$ARCHIVE_PATH"
+curl -fL --retry 3 --connect-timeout 10 "$AERO_PACKAGE_URL.sha256" -o "$CHECKSUM_PATH"
+
+info "校验分发包完整性..."
+if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$TEMP_DIR" && sha256sum -c "$ARCHIVE_FILE.sha256")
+elif command -v shasum >/dev/null 2>&1; then
+    (cd "$TEMP_DIR" && shasum -a 256 -c "$ARCHIVE_FILE.sha256")
+else
+    fail "系统缺少 sha256sum 或 shasum，无法校验安装包"
+fi
+
+PACKAGE_DIR="$TEMP_DIR/package"
+mkdir -p "$PACKAGE_DIR"
+tar -xzf "$ARCHIVE_PATH" -C "$PACKAGE_DIR"
+WHEEL_COUNT="$(find "$PACKAGE_DIR" -type f -name '*.whl' | wc -l | tr -d ' ')"
+[ "$WHEEL_COUNT" = "1" ] || fail "分发包格式错误：应包含且仅包含一个 wheel"
+WHEEL_PATH="$(find "$PACKAGE_DIR" -type f -name '*.whl' | head -n 1)"
+
+info "安装 Aero CLI（独立 Python 3.12 环境）..."
+uv tool install --python 3.12 --force "$WHEEL_PATH"
+
+UV_BIN_DIR="$(uv tool dir --bin 2>/dev/null || true)"
+if [ -n "$UV_BIN_DIR" ]; then
+    PATH="$UV_BIN_DIR:$PATH"
+    export PATH
+fi
+command -v aero >/dev/null 2>&1 || {
+    uv tool update-shell >/dev/null 2>&1 || true
+    fail "Aero 已安装，但当前 shell 尚未找到 aero；请重开终端后运行 aero setup"
 }
+ok "Aero CLI 已安装: $(command -v aero)"
 
-info "pip install..."
-"$CONDA_BIN" run -n base python -m pip install --progress-bar on "$TMP_DIR" 2>&1 || {
-    err "pip install 失败。请检查网络和 conda 环境。"
-    rm -rf "$TMP_DIR"
-    exit 1
-}
+if [ "${AERO_SKIP_SETUP:-0}" = "1" ]; then
+    info "已按 AERO_SKIP_SETUP=1 跳过运行时安装"
+else
+    info "安装 Aero 私有基础运行时..."
+    aero setup --yes
+    ok "私有运行时已就绪"
+fi
 
-rm -rf "$TMP_DIR"
-ok "Aero 安装完成"
-
-# ── Step 3: aero init ─────────────────────────────────────────────────
-banner ""
-banner "  Step 3/3: 初始化 Aero 运行时 (aero init)"
-banner ""
-
-info "创建/更新 aero-agent conda 环境..."
-"$CONDA_BIN" run -n base python -m aero.cli.main init || {
-    err "aero init 失败"
-    exit 1
-}
-ok "aero init 完成"
-
-# ── Done ─────────────────────────────────────────────────────────────────
-banner ""
-banner "  安装完成！"
-banner ""
-echo -e "  启动对话:  ${BOLD}cd <工作目录> && aero init && aero chat${NC}"
-echo ""
-echo -e "  请将 conda 加入 PATH (如尚未加入):"
-CONDA_BIN_DIR="$(dirname "$CONDA_BIN")"
-echo -e "    ${BOLD}export PATH=\"${CONDA_BIN_DIR}:\$PATH\"${NC}"
-echo ""
+printf "\n${BOLD}${GREEN}安装完成${NC}\n"
+printf "  进入研究目录后运行：\n"
+printf "    ${BOLD}aero init${NC}\n"
+printf "    ${BOLD}aero chat${NC}\n\n"
+printf "  环境检查：${BOLD}aero doctor${NC}\n"
+printf "  完整工具集：${BOLD}aero setup --full${NC}\n"

@@ -7103,6 +7103,43 @@ def main():
 
     elif cmd == "init":
         _init()
+    elif cmd == "setup":
+        from aero.cli.init_runtime import setup_runtime
+
+        setup_args = sys.argv[2:]
+        unknown = [arg for arg in setup_args if arg not in {"--full", "--yes", "-y"}]
+        if unknown:
+            print(f"未知参数: {unknown[0]}")
+            _print_usage()
+            sys.exit(2)
+        if not setup_runtime(
+            full="--full" in setup_args,
+            assume_yes="--yes" in setup_args or "-y" in setup_args,
+        ):
+            sys.exit(1)
+    elif cmd == "doctor":
+        from aero.cli.init_runtime import runtime_diagnostics
+
+        healthy, checks = runtime_diagnostics()
+        print("Aero 运行环境检查")
+        for label, passed, detail in checks:
+            print(f"  {'✓' if passed else '✗'} {label}: {detail}")
+        if not healthy:
+            print("\n运行 aero setup 修复基础运行时。")
+            sys.exit(1)
+    elif cmd == "runtime":
+        runtime_args = sys.argv[2:]
+        if not runtime_args or runtime_args[0] != "clean":
+            print("用法: aero runtime clean [--yes]")
+            sys.exit(2)
+        unknown = [arg for arg in runtime_args[1:] if arg not in {"--yes", "-y"}]
+        if unknown:
+            print(f"未知参数: {unknown[0]}")
+            sys.exit(2)
+        from aero.cli.init_runtime import clean_runtime
+
+        if not clean_runtime(assume_yes="--yes" in runtime_args or "-y" in runtime_args):
+            sys.exit(1)
     elif cmd in ("-v", "--version", "version"):
         print("Aero 0.1.0")
     elif cmd in ("-h", "--help", "help"):
@@ -7118,7 +7155,11 @@ def _print_usage():
 Aero — 气象科研 AI Agent IDE
 
 命令:
-  aero init            初始化当前目录的配置与工作目录
+  aero init            初始化当前目录的项目配置与工作目录
+  aero setup           安装独立的基础科学运行时（Python 3.12）
+  aero setup --full    预装完整科学计算工具集
+  aero doctor          检查 Aero 私有运行时
+  aero runtime clean   删除 Aero 私有运行时（不影响项目和用户 Conda）
   aero chat            启动 Textual TUI 对话（支持中文输入和流式输出）
   aero chat --continue 续接当前目录上一次保存的会话（短参数: -c）
   aero chat --mouse    启用 Textual 鼠标滚轮（默认已启用，保留兼容）
@@ -7141,8 +7182,6 @@ Aero — 气象科研 AI Agent IDE
 
 
 def _init():
-    from aero.cli.init_runtime import setup_runtime
-
     cwd = Path.cwd()
     config_path = cwd / "aero.yaml"
 
@@ -7152,7 +7191,6 @@ def _init():
         print(f"当前目录已初始化: {cwd}")
         print(f"   配置文件: {config_path}")
         print(f"   数据目录: {cwd / config.output.data_dir}")
-        setup_runtime()
         return
 
     print(f"在当前目录初始化 Aero 工作区: {cwd}")
@@ -7165,7 +7203,7 @@ def _init():
     print(f"当前目录已初始化: {config_path}")
     print(f"   数据目录: {cwd / config.output.data_dir}")
     print()
-    setup_runtime()
+    print("   运行环境: 使用 aero setup 单独安装，不修改用户的 Conda")
     print()
     print("启动对话: aero chat")
 

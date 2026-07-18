@@ -12,18 +12,25 @@ Aerolytica（命令行工具名：`aero`）是面向气象与地球科学研究�
 
 ## 安装
 
-要求 Python 3.12 或更高版本。
+推荐使用一键安装脚本。它通过 `uv tool` 安装独立的 Aero CLI，并在
+`~/.aero/runtime/` 创建 Aero 专用的 Micromamba 运行时；不会修改系统 Python、
+Conda base 或用户已有的 Conda 环境。
+
+```bash
+curl -LsSf https://aero.skyviewor.com/download/install.sh | sh
+```
+
+安装完成后可运行 `aero doctor` 检查环境。默认只准备 Python 3.12 基础运行时，
+科学计算命令会在首次使用时按需安装；需要离线前一次性准备完整工具集时运行
+`aero setup --full`。
+
+源码开发安装：
 
 ```bash
 git clone https://github.com/skyviewor/Aerolytica.git
 cd Aerolytica
-pip install -e ".[dev]"
-```
-
-也可以使用仓库提供的安装脚本准备运行环境：
-
-```bash
-./install.sh
+uv sync --extra dev
+uv run pytest
 ```
 
 ## 快速开始
@@ -64,7 +71,11 @@ aero chat
 
 | 命令 | 说明 |
 |---|---|
-| `aero init` | 初始化当前目录的项目配置、工作目录和运行环境 |
+| `aero init` | 初始化当前目录的项目配置与工作目录 |
+| `aero setup` | 安装或修复独立的基础科学运行时 |
+| `aero setup --full` | 预装完整科学计算工具集 |
+| `aero doctor` | 检查私有运行时及 Python 版本 |
+| `aero runtime clean` | 删除私有运行时，不影响项目文件和用户 Conda |
 | `aero chat` | 启动 Textual TUI 对话（默认启用鼠标） |
 | `aero chat --continue` | 续接当前目录最近保存的 TUI 会话（短参数 `-c`） |
 | `aero chat --no-mouse` | 禁用 TUI 鼠标模式，使用终端原生选择与复制 |

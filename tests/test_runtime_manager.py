@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import subprocess
 
 import pytest
 
@@ -16,20 +15,16 @@ def test_runtime_manager_detects_managed_commands():
     assert manager.managed_tools_in_command("echo cdo.txt") == []
 
 
-def test_runtime_manager_uses_injected_command_runner(tmp_path):
-    calls = []
+def test_runtime_manager_checks_private_environment_prefix(monkeypatch, tmp_path):
+    root = tmp_path / "runtime"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
+    manager = RuntimeToolManager()
+    micromamba = root / "bin" / "micromamba"
 
-    def fake_run(cmd, **kwargs):
-        calls.append((cmd, kwargs))
-        return subprocess.CompletedProcess(cmd, 0, stdout="aero-agent ready\n", stderr="")
+    assert manager.conda_env_exists(str(micromamba), {}) is False
 
-    manager = RuntimeToolManager(command_runner=fake_run)
-    conda = tmp_path / "bin" / "conda"
-    conda.parent.mkdir()
-    conda.write_text("#!/bin/sh\n")
-
-    assert manager.conda_env_exists(str(conda), {"PATH": str(conda.parent)}) is True
-    assert calls[0][0] == [str(conda), "env", "list"]
+    (root / "envs" / "aero-agent" / "conda-meta").mkdir(parents=True)
+    assert manager.conda_env_exists(str(micromamba), {}) is True
 
 
 @pytest.mark.asyncio
