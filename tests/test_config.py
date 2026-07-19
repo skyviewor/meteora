@@ -9,6 +9,8 @@ from aero.core.llm_providers import (
     BUILTIN_LLM_PROVIDERS,
     get_provider_preset,
     model_alias_for_provider,
+    model_summary,
+    model_supports_vision,
     normalize_provider_id,
 )
 
@@ -16,12 +18,13 @@ from aero.core.llm_providers import (
 def test_create_default_config():
     config = AeroConfig.create_default()
     assert config.llm.provider == "deepseek"
-    assert config.llm.model == "deepseek-chat"
+    assert config.llm.model == "deepseek-v4-flash"
     assert config.llm.reasoning_effort == ""
     assert config.output.data_dir == "data"
 
 
-def test_load_config(tmp_path):
+def test_load_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "missing-secrets.yaml"))
     data = {
         "llm": {
             "provider": "openai",
@@ -65,6 +68,7 @@ def test_save_config_omits_api_keys(tmp_path):
     config.llm.api_key = "sk-secret"
     config.credentials.cds.key = "cds-secret"
     config.vision.api_key = "vision-secret"
+    config.web_search.api_key = "search-secret"
     config_path = tmp_path / "aero.yaml"
 
     config.save(config_path)
@@ -73,6 +77,7 @@ def test_save_config_omits_api_keys(tmp_path):
     assert "sk-secret" not in text
     assert "cds-secret" not in text
     assert "vision-secret" not in text
+    assert "search-secret" not in text
 
 
 def test_load_config_applies_user_secrets(tmp_path, monkeypatch):
@@ -96,6 +101,56 @@ def test_load_config_applies_user_secrets(tmp_path, monkeypatch):
     assert loaded.credentials.cds.url == "https://cds.example/api"
     assert loaded.credentials.cds.key == "cds-global"
     assert loaded.vision.api_key == "vision-global"
+
+
+def test_web_search_secret_does_not_override_vision_model(tmp_path, monkeypatch):
+    from aero.core.config import save_web_search_api_key
+
+    secrets_path = tmp_path / "secrets.yaml"
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+    config = AeroConfig.create_default()
+    config.vision.mode = "separate"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen3.5-flash"
+    config.vision.api_key = "sk-vision"
+    config_path = tmp_path / "aero.yaml"
+    config.save(config_path)
+
+    save_web_search_api_key("sk-search", model="qwen-turbo")
+    loaded = AeroConfig.load(config_path)
+
+    assert loaded.vision.model == "qwen3.5-flash"
+    assert loaded.vision.api_key == ""
+    assert loaded.web_search.model == "qwen-turbo"
+    assert loaded.web_search.api_key == "sk-search"
+
+
+def test_legacy_web_search_secret_no_longer_overrides_vision_model(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.yaml"
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+    secrets_path.write_text(
+        yaml.dump(
+            {
+                "vision": {
+                    "provider": "bailian",
+                    "model": "qwen-turbo",
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "api_key": "sk-legacy-search",
+                }
+            }
+        )
+    )
+    config = AeroConfig.create_default()
+    config.vision.mode = "separate"
+    config.vision.model = "qwen3.5-flash"
+    config_path = tmp_path / "aero.yaml"
+    config.save(config_path)
+
+    loaded = AeroConfig.load(config_path)
+
+    assert loaded.vision.model == "qwen3.5-flash"
+    assert loaded.vision.api_key == "sk-legacy-search"
+    assert loaded.web_search.api_key == "sk-legacy-search"
 
 
 def test_default_config_uses_global_active_llm_profile(tmp_path, monkeypatch):
@@ -152,6 +207,8 @@ def test_project_provider_api_keys_are_ignored(tmp_path, monkeypatch):
     loaded = AeroConfig.load(config_path)
 
     assert loaded.llm.active_api_key() == ""
+    assert loaded.llm.model == "deepseek-v4-flash"
+    assert loaded.llm.providers["deepseek"].model == "deepseek-v4-flash"
     assert loaded.credentials.cds.key == ""
     assert loaded.vision.api_key == ""
 
@@ -168,11 +225,19 @@ def test_llm_provider_presets():
     assert normalize_provider_id("阿里云百炼") == "bailian"
     assert normalize_provider_id("qwen3.7") == "bailian"
     assert "siliconflow" not in BUILTIN_LLM_PROVIDERS
-    assert model_alias_for_provider("qwen3.7") == ("bailian", "qwen3.7")
+    assert model_alias_for_provider("qwen3.7") == ("bailian", "qwen3.7-plus")
     preset = get_provider_preset("kimi")
     assert preset is not None
     assert preset.default_model
     assert preset.base_url.endswith("/v1")
+    for provider_id, provider_preset in BUILTIN_LLM_PROVIDERS.items():
+        assert all(
+            model_summary(provider_id, model) != "文本"
+            for model in provider_preset.models
+        )
+    assert model_summary("bailian", "qwen3.7-plus").startswith("多模态")
+    assert model_supports_vision("bailian", "qwen3.7-plus") is True
+    assert model_supports_vision("bailian", "qwen3.7-max") is False
 
 
 def test_configure_llm_provider_tool(tmp_path, monkeypatch):
@@ -181,7 +246,7 @@ def test_configure_llm_provider_tool(tmp_path, monkeypatch):
     secrets_path = tmp_path / "secrets.yaml"
     monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
     config = AeroConfig.create_default()
-    config.llm.model = "deepseek-chat"
+    config.llm.model = "deepseek-v4-flash"
     config_path = tmp_path / "aero.yaml"
     config.save(config_path)
     monkeypatch.chdir(tmp_path)
@@ -199,7 +264,7 @@ def test_configure_llm_provider_tool(tmp_path, monkeypatch):
     assert loaded.llm.provider == "deepseek"
     assert loaded.llm.active_api_key() == "sk-test-0002"
     assert loaded.llm.providers["deepseek"].api_key == "sk-test-0002"
-    assert loaded.llm.model == "deepseek-chat"
+    assert loaded.llm.model == "deepseek-v4-flash"
 
     result = configure_llm_provider(provider="kimi", api_key="sk-test-0003")
     assert result["status"] == "success"
@@ -207,7 +272,7 @@ def test_configure_llm_provider_tool(tmp_path, monkeypatch):
     assert "sk-test-0003" not in config_path.read_text()
     loaded = AeroConfig.load(config_path)
     assert loaded.llm.provider == "kimi"
-    assert loaded.llm.model == "kimi-k2.6"
+    assert loaded.llm.model == "kimi-k3"
     assert loaded.llm.base_url == "https://api.moonshot.cn/v1"
     assert loaded.llm.providers["deepseek"].api_key == "sk-test-0002"
     assert loaded.llm.providers["kimi"].api_key == "sk-test-0003"
@@ -216,7 +281,7 @@ def test_configure_llm_provider_tool(tmp_path, monkeypatch):
     assert result["status"] == "success"
     loaded = AeroConfig.load(config_path)
     assert loaded.llm.provider == "bailian"
-    assert loaded.llm.model == "qwen3.7"
+    assert loaded.llm.model == "qwen3.7-plus"
     assert loaded.llm.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert loaded.llm.providers["bailian"].api_key == "sk-test-0004"
     loaded.llm.switch_provider("deepseek")
@@ -231,7 +296,7 @@ def test_configure_llm_provider_tool(tmp_path, monkeypatch):
     assert loaded.llm.providers["bailian"].api_key == ""
     assert loaded.llm.providers["deepseek"].api_key == "sk-test-0002"
     assert loaded.llm.provider == "bailian"
-    assert loaded.llm.model == "qwen3.7"
+    assert loaded.llm.model == "qwen3.7-plus"
 
     result = configure_llm_provider(provider="kimi", api_key="sk-test-0005")
     assert result["status"] == "success"
@@ -338,3 +403,91 @@ def test_check_earthdata_config_uses_current_profile_labels(tmp_path, monkeypatc
     assert "Access Token" in result["message"]
     assert "Generate Token" in result["message"]
     assert "Create Token" not in result["message"]
+
+
+def test_vision_can_reuse_a_multimodal_primary_model(tmp_path, monkeypatch):
+    from aero.core.config import resolved_vision_config, vision_is_configured
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    config.llm.provider = "openai"
+    config.llm.model = "gpt-4o"
+    config.llm.supports_vision = True
+    config.llm.set_active_api_key("sk-primary")
+    config.vision.mode = "reuse_primary"
+
+    assert vision_is_configured(config) is True
+    resolved = resolved_vision_config(config)
+    assert resolved is not None
+    assert resolved.provider == "openai"
+    assert resolved.model == "gpt-4o"
+    assert resolved.api_key == "sk-primary"
+
+
+def test_separate_vision_credentials_are_not_saved_to_project_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    config.vision.mode = "separate"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen-vl-max"
+    config.vision.api_key = "sk-vision-secret"
+    config_path = tmp_path / "aero.yaml"
+
+    config.save(config_path)
+
+    assert "sk-vision-secret" not in config_path.read_text()
+    assert "mode: separate" in config_path.read_text()
+
+
+def test_save_user_secrets_is_owner_readable_only(tmp_path, monkeypatch):
+    from aero.core.config import save_user_secrets
+
+    path = tmp_path / "secrets.yaml"
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(path))
+    save_user_secrets({"llm": {"providers": {"deepseek": {"api_key": "sk-test"}}}})
+
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_legacy_deepseek_secret_cannot_override_selected_flash(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        yaml.dump(
+            {
+                "llm": {
+                    "active_provider": "deepseek",
+                    "providers": {
+                        "deepseek": {
+                            "api_key": "sk-legacy",
+                            "model": "deepseek-chat",
+                            "base_url": "https://api.deepseek.com",
+                        }
+                    },
+                }
+            }
+        )
+    )
+    config_path = tmp_path / "aero.yaml"
+    config_path.write_text(
+        yaml.dump(
+            {
+                "llm": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "providers": {
+                        "deepseek": {
+                            "model": "deepseek-v4-flash",
+                            "base_url": "https://api.deepseek.com",
+                        }
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+
+    loaded = AeroConfig.load(config_path)
+
+    assert loaded.llm.model == "deepseek-v4-flash"
+    assert loaded.llm.providers["deepseek"].model == "deepseek-v4-flash"
+    assert loaded.llm.active_api_key() == "sk-legacy"

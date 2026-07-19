@@ -5,6 +5,11 @@ from aero.data.web_search import _build_arguments, _normalize_search_response
 from aero.toolbox.tools import web_search
 
 
+@pytest.fixture(autouse=True)
+def _isolate_user_secrets(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+
+
 def test_build_arguments_adapts_to_mcp_schema():
     schema = {
         "type": "object",
@@ -115,6 +120,27 @@ async def test_search_web_reuses_vision_key_without_returning_it(monkeypatch):
     assert result["api_key_configured"] is True
     assert result["credential_reused"] is True
     assert "sk-vision-secret" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_search_web_uses_its_own_credential_before_vision(monkeypatch):
+    config = AeroConfig.create_default()
+    config.web_search.api_key = "sk-search-secret"
+    config.vision.api_key = "sk-vision-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+    captured = {}
+
+    async def fake_search(api_key, query, **kwargs):
+        captured["api_key"] = api_key
+        return {"found": True, "results": [], "content": "", "references": []}
+
+    monkeypatch.setattr(web_search, "search_bailian_web", fake_search)
+
+    result = await web_search.search_web("杭州天气")
+
+    assert captured["api_key"] == "sk-search-secret"
+    assert result["credential_reused"] is False
+    assert result["credential_source"] == "联网搜索 API Key"
 
 
 @pytest.mark.asyncio

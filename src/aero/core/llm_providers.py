@@ -25,8 +25,6 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
         models=(
             "deepseek-v4-flash",
             "deepseek-v4-pro",
-            "deepseek-chat",
-            "deepseek-reasoner",
         ),
         api_key_url="https://platform.deepseek.com/api_keys",
         api_key_hint="打开 DeepSeek 开放平台，在 API keys 页面创建并复制 sk- 开头的 key。",
@@ -35,15 +33,14 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
         id="bailian",
         name="阿里云百炼",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        default_model="qwen-plus",
+        default_model="qwen3.7-plus",
         models=(
-            "qwen3.7",
-            "qwen-plus",
-            "qwen-max",
-            "qwen-turbo",
-            "qwen-long",
-            "qwen3-max",
-            "qwen3-plus",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+            "qwen3.6-flash",
+            "qwen3.5-plus",
+            "qwen3.5-flash",
         ),
         api_key_url="https://bailian.console.aliyun.com/",
         api_key_hint="打开阿里云百炼控制台，在 API-KEY 管理页面创建并复制 DashScope API key。",
@@ -52,27 +49,78 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
         id="kimi",
         name="Kimi",
         base_url="https://api.moonshot.cn/v1",
-        default_model="kimi-k2.6",
+        default_model="kimi-k3",
         models=(
+            "kimi-k3",
+            "kimi-k2.7-code",
             "kimi-k2.6",
             "kimi-k2.5",
-            "kimi-k2-thinking",
-            "kimi-k2-0905-preview",
-            "moonshot-v1-128k",
-            "moonshot-v1-32k",
         ),
         api_key_url="https://platform.moonshot.cn/console/api-keys",
         api_key_hint="打开 Kimi 开放平台控制台，在 API Keys 页面创建并复制 Moonshot API key。",
     ),
-    "openai": LLMProviderPreset(
-        id="openai",
-        name="OpenAI",
-        base_url="https://api.openai.com/v1",
-        default_model="gpt-4o",
-        models=("gpt-4o", "gpt-4o-mini"),
-        api_key_url="https://platform.openai.com/api-keys",
-        api_key_hint="打开 OpenAI Platform，在 API keys 页面创建并复制 key。",
+    "zhipu": LLMProviderPreset(
+        id="zhipu",
+        name="智谱 GLM",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        default_model="glm-5",
+        models=(
+            "glm-5",
+            "glm-5.1-highspeed",
+            "glm-4.6v",
+            "glm-4.6v-flashx",
+        ),
+        api_key_url="https://open.bigmodel.cn/",
+        api_key_hint="打开智谱 AI 开放平台，在 API Keys 管理页面创建并复制 API key。",
     ),
+    "minimax": LLMProviderPreset(
+        id="minimax",
+        name="MiniMax",
+        base_url="https://api.minimaxi.com/v1",
+        default_model="MiniMax-M3",
+        models=(
+            "MiniMax-M3",
+            "MiniMax-M2.7",
+            "MiniMax-M2.5",
+        ),
+        api_key_url="https://platform.minimax.io/",
+        api_key_hint="打开 MiniMax 开放平台，在 API Keys 页面创建并复制 API key。",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ModelMetadata:
+    """Short, user-facing capabilities for a known model."""
+
+    summary: str
+    supports_vision: bool = False
+
+
+MODEL_METADATA: dict[tuple[str, str], ModelMetadata] = {
+    ("deepseek", "deepseek-v4-flash"): ModelMetadata("文本 · 高性价比"),
+    ("deepseek", "deepseek-v4-pro"): ModelMetadata("文本 · 旗舰"),
+    ("bailian", "qwen3.7-max"): ModelMetadata("文本 · 旗舰"),
+    ("bailian", "qwen3.7-plus"): ModelMetadata("多模态 · 均衡", supports_vision=True),
+    ("bailian", "qwen3.6-plus"): ModelMetadata("多模态 · 高质量", supports_vision=True),
+    ("bailian", "qwen3.6-flash"): ModelMetadata("多模态 · 低成本", supports_vision=True),
+    ("bailian", "qwen3.5-plus"): ModelMetadata("多模态 · 旧版", supports_vision=True),
+    ("bailian", "qwen3.5-flash"): ModelMetadata("多模态 · 旧版", supports_vision=True),
+    ("bailian", "qwen3-vl-plus"): ModelMetadata("多模态 · 高质量", supports_vision=True),
+    ("bailian", "qwen3-vl-flash"): ModelMetadata("多模态 · 低成本", supports_vision=True),
+    ("bailian", "qwen-vl-max"): ModelMetadata("多模态 · 旧版", supports_vision=True),
+    ("bailian", "qwen-vl-plus"): ModelMetadata("多模态 · 旧版", supports_vision=True),
+    ("kimi", "kimi-k3"): ModelMetadata("多模态 · 旗舰", supports_vision=True),
+    ("kimi", "kimi-k2.7-code"): ModelMetadata("文本 · 代码"),
+    ("kimi", "kimi-k2.6"): ModelMetadata("多模态 · 均衡", supports_vision=True),
+    ("kimi", "kimi-k2.5"): ModelMetadata("多模态 · 旧版", supports_vision=True),
+    ("zhipu", "glm-5"): ModelMetadata("文本 · 旗舰"),
+    ("zhipu", "glm-5.1-highspeed"): ModelMetadata("文本 · 高速"),
+    ("zhipu", "glm-4.6v"): ModelMetadata("多模态 · 高质量", supports_vision=True),
+    ("zhipu", "glm-4.6v-flashx"): ModelMetadata("多模态 · 低成本", supports_vision=True),
+    ("minimax", "minimax-m3"): ModelMetadata("多模态 · 旗舰", supports_vision=True),
+    ("minimax", "minimax-m2.7"): ModelMetadata("文本 · 高质量"),
+    ("minimax", "minimax-m2.5"): ModelMetadata("文本 · 均衡"),
 }
 
 
@@ -93,14 +141,19 @@ PROVIDER_ALIASES = {
     "月之暗面": "kimi",
     "deepseek": "deepseek",
     "深度求索": "deepseek",
+    "zhipu": "zhipu",
+    "智谱": "zhipu",
+    "glm": "zhipu",
+    "bigmodel": "zhipu",
+    "minimax": "minimax",
 }
 
 PROVIDER_MODEL_ALIASES = {
-    "qwen3.7": ("bailian", "qwen3.7"),
-    "kimi-k2": ("kimi", "kimi-k2.6"),
-    "k2": ("kimi", "kimi-k2.6"),
-    "kimi-thinking": ("kimi", "kimi-k2-thinking"),
-    "kimi-k2-thinking": ("kimi", "kimi-k2-thinking"),
+    "qwen3.7": ("bailian", "qwen3.7-plus"),
+    "kimi-k2": ("kimi", "kimi-k3"),
+    "k2": ("kimi", "kimi-k3"),
+    "kimi-k3": ("kimi", "kimi-k3"),
+    "k3": ("kimi", "kimi-k3"),
 }
 
 
@@ -122,3 +175,31 @@ def provider_options() -> list[tuple[str, str]]:
         (preset.id, f"{preset.name}    {preset.default_model}")
         for preset in BUILTIN_LLM_PROVIDERS.values()
     ]
+
+
+def model_summary(provider: str, model: str) -> str:
+    """Return a concise user-facing summary for a known model."""
+    provider_id = normalize_provider_id(provider)
+    metadata = MODEL_METADATA.get((provider_id, model.strip().lower()))
+    return metadata.summary if metadata else "文本"
+
+
+def model_tags(provider: str, model: str) -> tuple[str, str]:
+    """Return aligned type and positioning labels for a known model."""
+    summary = model_summary(provider, model)
+    model_type, _, positioning = summary.partition(" · ")
+    return model_type, positioning
+
+
+def model_supports_vision(provider: str, model: str) -> bool:
+    """Return whether a built-in model is known to accept image messages."""
+    provider_id = normalize_provider_id(provider)
+    model_id = model.strip().lower()
+    metadata = MODEL_METADATA.get((provider_id, model_id))
+    if metadata is not None:
+        return metadata.supports_vision
+    if provider_id == "openai":
+        return model_id.startswith("gpt-4o") or model_id.startswith("gpt-4.1")
+    if provider_id == "bailian":
+        return "vl" in model_id
+    return False

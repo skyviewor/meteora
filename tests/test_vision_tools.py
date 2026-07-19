@@ -4,7 +4,7 @@ import pytest
 from aero.core.config import AeroConfig
 
 
-def test_check_vision_model_config_not_configured_guides_bailian(tmp_path, monkeypatch):
+def test_check_vision_model_config_not_configured_describes_safe_setup(tmp_path, monkeypatch):
     from aero.toolbox import builtin_tools
 
     monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "empty-secrets.yaml"))
@@ -17,9 +17,8 @@ def test_check_vision_model_config_not_configured_guides_bailian(tmp_path, monke
     assert result["status"] == "not_configured"
     assert result["configured"] is False
     assert result["provider"] == "bailian"
-    assert "阿里云百炼 Qwen" in result["message"]
-    assert "DeepSeek" not in result["message"]
-    assert "bailian.console.aliyun.com" in result["api_key_url"]
+    assert result["mode"] == "unconfigured"
+    assert "安全的配置界面" in result["message"]
 
 
 def test_check_vision_model_config_configured_uses_vision_config(tmp_path, monkeypatch):
@@ -41,12 +40,12 @@ def test_check_vision_model_config_configured_uses_vision_config(tmp_path, monke
     assert result["configured"] is True
     assert result["provider"] == "bailian"
     assert result["model"] == "qwen-vl-max"
-    assert result["api_key_configured"] is True
-    assert "主聊天模型" in result["message"]
+    assert result["mode"] == "separate"
+    assert "视觉模型已配置" in result["message"]
 
 
 @pytest.mark.asyncio
-async def test_analyze_image_not_configured_guides_bailian_api_key_setup(tmp_path, monkeypatch):
+async def test_analyze_image_not_configured_requests_safe_visual_setup(tmp_path, monkeypatch):
     from aero.toolbox import builtin_tools
 
     monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "empty-secrets.yaml"))
@@ -59,13 +58,9 @@ async def test_analyze_image_not_configured_guides_bailian_api_key_setup(tmp_pat
         prompt="分析这张图",
     )
 
-    api_key_url = "https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key"
     assert result["status"] == "not_configured"
-    assert f"[阿里云百炼 API Key]({api_key_url})" in result["message"]
-    assert f"请复制这个地址打开：{api_key_url}" in result["message"]
-    assert "登录后从左侧菜单栏进入 API Key 模块" in result["message"]
-    assert "点击「创建 API Key」" in result["message"]
-    assert "从左侧菜单栏进入 API Key 模块" in result["setup_steps"]
+    assert "安全配置界面" in result["message"]
+    assert result["setup_required"] == "vision"
 
 
 @pytest.mark.asyncio
@@ -92,7 +87,14 @@ async def test_analyze_image_reports_blank_exception_type(tmp_path, monkeypatch)
         async def analyze(self, image_paths, prompt, detail):
             raise RuntimeError()
 
-    monkeypatch.setattr(vision, "_ensure_vision_client", lambda: (BlankVisionClient(), config))
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(
+        vision,
+        "_ensure_vision_client",
+        lambda: (BlankVisionClient(), config, config.vision),
+    )
 
     result = await builtin_tools.analyze_image([str(image)], "分析这张图")
 
@@ -134,7 +136,14 @@ async def test_analyze_image_reports_vision_http_details(tmp_path, monkeypatch):
                 response_excerpt='{"message":"invalid image"}',
             )
 
-    monkeypatch.setattr(vision, "_ensure_vision_client", lambda: (ErrorVisionClient(), config))
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(
+        vision,
+        "_ensure_vision_client",
+        lambda: (ErrorVisionClient(), config, config.vision),
+    )
 
     result = await builtin_tools.analyze_image([str(image)], "分析这张图")
 

@@ -167,7 +167,7 @@ def test_request_body_includes_reasoning_effort():
     client = LLMClient(LLMConfig(api_key="sk-test", reasoning_effort="high"))
     body = client._request_body([Message(role="user", content="Hi")], stream=True)
 
-    assert body["model"] == "deepseek-chat"
+    assert body["model"] == "deepseek-v4-flash"
     assert body["stream"] is True
     assert body["reasoning_effort"] == "high"
 

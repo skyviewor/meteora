@@ -1,6 +1,12 @@
-"""Vision model configuration and image analysis tools."""
+"""Vision-model configuration and image-analysis tools."""
 
-from aero.core.config import AeroConfig, save_vision_api_key, user_secrets_path
+from aero.core.config import (
+    AeroConfig,
+    resolved_vision_config,
+    save_vision_api_key,
+    user_secrets_path,
+    vision_is_configured,
+)
 from aero.core.debug_log import debug_exception
 from aero.toolbox.config_access import find_config, find_config_path
 from aero.toolbox.paths import short_path
@@ -11,9 +17,10 @@ def _ensure_vision_client():
     from aero.agent.vision_client import VisionClient
 
     config = find_config()
-    if not config.vision.model or not config.vision.api_key:
-        return None, config
-    return VisionClient(config.vision), config
+    vision_config = resolved_vision_config(config)
+    if vision_config is None:
+        return None, config, None
+    return VisionClient(vision_config), config, vision_config
 
 
 _vision_usage: dict | None = None
@@ -28,13 +35,7 @@ def reset_vision_usage() -> None:
     _vision_usage = None
 
 
-def _vision_error_payload(
-    exc: Exception,
-    *,
-    config,
-    image_paths: list[str],
-    detail: str,
-) -> dict:
+def _vision_error_payload(exc: Exception, *, config, image_paths: list[str], detail: str) -> dict:
     error_type = getattr(exc, "error_type", exc.__class__.__name__)
     status_code = getattr(exc, "status_code", None)
     response_excerpt = getattr(exc, "response_excerpt", "")
@@ -51,8 +52,8 @@ def _vision_error_payload(
         "error_type": error_type,
         "status_code": status_code,
         "response_excerpt": response_excerpt,
-        "provider": config.vision.provider,
-        "model": config.vision.model,
+        "provider": config.provider,
+        "model": config.model,
         "detail": detail,
         "image_paths": image_paths,
     }
@@ -60,39 +61,31 @@ def _vision_error_payload(
 
 @register_tool(
     name="check_vision_model_config",
-    description=(
-        "检查视觉模型是否已配置。用户询问「视觉模型配置了吗」、"
-        "vision model 是否配置、图片分析模型状态时调用。"
-        "只检查独立视觉模型配置，不检查主聊天 LLM 配置。"
-    ),
-    parameters={
-        "type": "object",
-        "properties": {},
-    },
+    description="检查视觉模型是否已配置，包含独立视觉模型或复用主模型能力的模式。",
+    parameters={"type": "object", "properties": {}},
 )
 def check_vision_model_config() -> dict:
     config = find_config()
-    api_key_url = "https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key"
-    configured = bool(config.vision.api_key and config.vision.model)
-    if configured:
-        message = (
-            f"视觉模型已配置：{config.vision.provider}/{config.vision.model}。"
-            "它独立于主聊天模型，用于图片分析。"
-        )
+    configured = vision_is_configured(config)
+    mode = config.vision.mode
+    if configured and mode == "reuse_primary":
+        provider, model = config.llm.provider, config.llm.model
+        message = f"视觉能力已配置：复用主模型 {provider}/{model}。"
+    elif configured:
+        provider, model = config.vision.provider, config.vision.model
+        message = f"视觉模型已配置：{provider}/{model}。"
     else:
+        provider, model = config.vision.provider, config.vision.model
         message = (
-            "视觉模型还没有配置。视觉模型独立于主聊天模型，"
-            "运行在阿里云百炼 Qwen 上。\n\n"
-            f"请到这里创建或复制 API key：{api_key_url}\n\n"
-            "拿到后直接粘贴给我即可，我会在本地保存视觉模型配置。"
+            "尚未配置视觉模型。需要分析图片时，Aero 会打开安全的配置界面；"
+            "你也可以在首次引导中选择复用支持多模态的主模型。"
         )
     return {
         "status": "configured" if configured else "not_configured",
         "configured": configured,
-        "provider": config.vision.provider,
-        "model": config.vision.model,
-        "api_key_configured": bool(config.vision.api_key),
-        "api_key_url": api_key_url,
+        "mode": mode,
+        "provider": provider,
+        "model": model,
         "message": message,
     }
 
@@ -100,40 +93,22 @@ def check_vision_model_config() -> dict:
 @register_tool(
     name="analyze_image",
     description=(
-        "调用视觉模型分析图片。用于读取气象图表、卫星云图、雷达图、"
-        "预报场可视化、多图对比等。支持单图或多图（多帧序列）。"
-        "未配置视觉模型时会返回提示引导用户完成设置。"
+        "调用视觉模型分析图片，用于气象图表、卫星云图、雷达图、预报场可视化和多图对比。"
+        "未配置视觉能力时会返回提示，客户端将引导用户安全配置。"
     ),
     parameters={
         "type": "object",
         "properties": {
-            "image_paths": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "图片文件路径列表。多图时可做对比分析。支持 png/jpg/webp/gif/bmp",
-            },
-            "prompt": {
-                "type": "string",
-                "description": "分析任务描述，如'描述500hPa高度场特征'或'对比两张图的差异'",
-            },
-            "detail": {
-                "type": "string",
-                "enum": ["low", "high", "auto"],
-                "description": "分辨率级别。high 适合密集图表细读，auto 自适应。默认 high",
-            },
-            "force": {
-                "type": "boolean",
-                "description": "是否强制不走缓存重新分析。默认 false。当上次结果不佳时设为 true",
-            },
+            "image_paths": {"type": "array", "items": {"type": "string"}},
+            "prompt": {"type": "string"},
+            "detail": {"type": "string", "enum": ["low", "high", "auto"]},
+            "force": {"type": "boolean"},
         },
         "required": ["image_paths", "prompt"],
     },
 )
 async def analyze_image(
-    image_paths: list[str],
-    prompt: str,
-    detail: str = "high",
-    force: bool = False,
+    image_paths: list[str], prompt: str, detail: str = "high", force: bool = False
 ) -> dict:
     global _vision_usage
     _vision_usage = None
@@ -142,106 +117,76 @@ async def analyze_image(
     from aero.data.vision_cache import get as cache_get
     from aero.data.vision_cache import put as cache_put
 
-    client, config = _ensure_vision_client()
-    if client is None:
-        api_key_url = "https://bailian.console.aliyun.com/cn-beijing?tab=model#/api-key"
+    client, _, vision_config = _ensure_vision_client()
+    if client is None or vision_config is None:
         return {
             "status": "not_configured",
             "message": (
-                "视觉模型还没有配置，需要先创建阿里云百炼 API Key。\n\n"
-                f"控制台入口：[阿里云百炼 API Key]({api_key_url})\n"
-                f"如果你的终端不能点击链接，请复制这个地址打开：{api_key_url}\n\n"
-                "登录后从左侧菜单栏进入 API Key 模块，点击「创建 API Key」，"
-                "将生成的 Key 粘贴给我，我会帮你保存配置。"
+                "当前任务需要视觉模型，但尚未配置视觉能力。请在 Aero 的安全配置界面中"
+                "选择复用支持多模态的主模型，或配置独立视觉模型。"
             ),
-            "setup_steps": [
-                f"打开阿里云百炼控制台：{api_key_url}",
-                "根据提示完成登录",
-                "从左侧菜单栏进入 API Key 模块",
-                "点击「创建 API Key」",
-                "将生成的 Key 粘贴给我",
-            ],
+            "setup_required": "vision",
         }
 
     for path in image_paths:
-        p = Path(path)
-        if not p.exists():
+        if not Path(path).exists():
             return {"status": "error", "message": f"图片文件不存在：{short_path(path)}"}
 
     if not force:
-        cached = cache_get(image_paths, prompt, config.vision.model, config.vision.cache_ttl_hours)
+        cached = cache_get(
+            image_paths, prompt, vision_config.model, vision_config.cache_ttl_hours
+        )
         if cached:
             return {
                 "status": "success",
                 "analysis": cached,
-                "model": config.vision.model,
+                "model": vision_config.model,
                 "cached": True,
             }
 
     try:
         result = await client.analyze(image_paths, prompt, detail)
         _vision_usage = client.last_usage
-    except Exception as e:
+    except Exception as exc:
         debug_exception(
-            "vision.analyze_failed",
-            e,
-            provider=config.vision.provider,
-            model=config.vision.model,
-            image_paths=image_paths,
-            detail=detail,
+            "vision.analyze_failed", exc, provider=vision_config.provider,
+            model=vision_config.model, image_paths=image_paths, detail=detail,
         )
         return _vision_error_payload(
-            e,
-            config=config,
+            exc,
+            config=vision_config,
             image_paths=image_paths,
             detail=detail,
         )
+    finally:
+        await client.close()
 
-    cache_put(image_paths, prompt, config.vision.model, result)
-
-    return {
-        "status": "success",
-        "analysis": result,
-        "model": config.vision.model,
-        "cached": False,
-    }
+    cache_put(image_paths, prompt, vision_config.model, result)
+    return {"status": "success", "analysis": result, "model": vision_config.model, "cached": False}
 
 
 @register_tool(
     name="configure_vision_model",
-    description=(
-        "保存视觉模型的 API Key 配置。用户提供 Key 后立即调用此工具保存。"
-        "无需提前调用，仅当 analyze_image 返回未配置时使用。"
-    ),
+    description="保存独立视觉模型的 API Key 配置。",
     parameters={
         "type": "object",
-        "properties": {
-            "api_key": {
-                "type": "string",
-                "description": "百炼 API Key",
-            },
-        },
+        "properties": {"api_key": {"type": "string"}},
         "required": ["api_key"],
     },
 )
 def configure_vision_model(api_key: str) -> dict:
     config_path = find_config_path()
-    config = (
-        AeroConfig.load(config_path) if config_path.exists() else AeroConfig.create_default()
-    )
-
-    config.vision.api_key = api_key
+    config = AeroConfig.load(config_path) if config_path.exists() else AeroConfig.create_default()
+    config.vision.mode = "separate"
     config.vision.provider = "bailian"
     config.vision.model = "qwen3.7-plus"
-    save_vision_api_key(api_key, config.vision.base_url)
+    save_vision_api_key(
+        api_key, config.vision.base_url, provider=config.vision.provider, model=config.vision.model
+    )
     config.save(config_path)
-
     return {
         "status": "success",
-        "message": (
-            f"视觉模型已配置（{config.vision.provider}/{config.vision.model}），"
-            f"API Key 已保存到 {user_secrets_path()}。现在可以使用 analyze_image 工具分析图片了。"
-        ),
+        "message": f"视觉模型已配置（{config.vision.provider}/{config.vision.model}）。",
         "config_path": str(config_path),
         "secrets_path": str(user_secrets_path()),
     }

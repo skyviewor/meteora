@@ -10,8 +10,11 @@ from aero.cli.main import (
     _parse_llm_clear_from_text,
     _parse_llm_setup_from_text,
     _requests_vision_key_reuse,
+    _usage_meta_text,
 )
 from aero.core.config import AeroConfig
+from aero.core.llm_providers import BUILTIN_LLM_PROVIDERS
+from aero.data.pricing import TokenTracker, context_window_for
 
 
 def test_parse_qwen_setup_uses_bailian():
@@ -24,7 +27,7 @@ def test_parse_qwen_setup_uses_bailian():
 
     assert setup is not None
     assert setup["provider"] == "bailian"
-    assert setup["model"] == "qwen3.7"
+    assert setup["model"] == "qwen3.7-plus"
     assert setup["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert setup["api_key"] == "sk-test-0004"
 
@@ -39,7 +42,7 @@ def test_parse_kimi_provider_does_not_use_provider_name_as_model():
 
     assert setup is not None
     assert setup["provider"] == "kimi"
-    assert setup["model"] == "kimi-k2.6"
+    assert setup["model"] == "kimi-k3"
     assert setup["base_url"] == "https://api.moonshot.cn/v1"
     assert setup["api_key"] == "sk-test-0005"
 
@@ -48,25 +51,25 @@ def test_parse_explicit_kimi_model():
     config = AeroConfig.create_default()
 
     setup = _parse_llm_setup_from_text(
-        "配置 kimi-k2-thinking，API key: sk-test-0006",
+        "配置 kimi-k2.7-code，API key: sk-test-0006",
         config,
     )
 
     assert setup is not None
     assert setup["provider"] == "kimi"
-    assert setup["model"] == "kimi-k2-thinking"
+    assert setup["model"] == "kimi-k2.7-code"
 
 
 def test_parse_key_only_keeps_current_provider_model():
     config = AeroConfig.create_default()
     config.llm.provider = "deepseek"
-    config.llm.model = "deepseek-chat"
+    config.llm.model = "deepseek-v4-flash"
 
     setup = _parse_llm_setup_from_text("换 key: sk-test-0002", config)
 
     assert setup is not None
     assert setup["provider"] == "deepseek"
-    assert setup["model"] == "deepseek-chat"
+    assert setup["model"] == "deepseek-v4-flash"
     assert setup["api_key"] == "sk-test-0002"
 
 
@@ -147,3 +150,91 @@ async def test_bare_api_key_is_masked_and_never_starts_agent():
     assert "sk-new-sensitive-value" not in transcript
     assert "sk-n...alue" in transcript
     assert app._agent_worker is None
+
+
+def test_detect_vision_setup_result():
+    from aero.cli.main import _vision_setup_required
+
+    assert _vision_setup_required('{"status": "not_configured", "setup_required": "vision"}')
+    assert not _vision_setup_required('{"status": "success"}')
+
+
+def test_all_builtin_models_have_explicit_context_windows():
+    models = {
+        model
+        for preset in BUILTIN_LLM_PROVIDERS.values()
+        for model in preset.models
+    }
+
+    assert len(models) == 19
+    assert all(context_window_for(model) is not None for model in models)
+    assert context_window_for("qwen3.6-flash") == 1_000_000
+    assert context_window_for("MiniMax-M3") == 1_000_000
+    assert context_window_for("minimax-m3") == 1_000_000
+
+
+def test_unknown_model_has_no_assumed_context_window():
+    assert context_window_for("custom-future-model") is None
+
+
+def test_usage_meta_uses_qwen_one_million_context_window():
+    tracker = TokenTracker(current_prompt_tokens=36_600)
+
+    text = _usage_meta_text(tracker, "qwen3.6-flash")
+
+    assert "上下文[/dim] 36.6K" in text
+    assert "/ 4%" in text
+    assert "112%" not in text
+
+
+def test_usage_meta_omits_percentage_for_unknown_model():
+    tracker = TokenTracker(current_prompt_tokens=36_600)
+
+    text = _usage_meta_text(tracker, "custom-future-model")
+
+    assert "上下文[/dim] 36.6K" in text
+    assert "%" not in text
+
+
+def test_input_meta_migrates_legacy_deepseek_chat_to_flash(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        "llm:\n"
+        "  active_provider: deepseek\n"
+        "  providers:\n"
+        "    deepseek:\n"
+        "      api_key: sk-legacy\n"
+        "      model: deepseek-chat\n"
+        "      base_url: https://api.deepseek.com\n"
+    )
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+
+    app = AeroApp(AeroConfig.create_default(), persist_config=False)
+    text = app._input_meta_text()
+
+    assert app.config.llm.model == "deepseek-v4-flash"
+    assert "DeepSeek V4 Flash" in text
+    assert "DeepSeek Chat" not in text
+
+
+@pytest.mark.asyncio
+async def test_model_switch_syncs_user_profile_agent_and_status(tmp_path, monkeypatch):
+    secrets_path = tmp_path / "secrets.yaml"
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+    monkeypatch.chdir(tmp_path)
+    config = AeroConfig.create_default()
+    config.llm.model = "deepseek-v4-pro"
+    config.llm.set_active_api_key("sk-test-model-switch")
+    config.llm.apply_active_provider_defaults()
+    app = AeroApp(config, persist_config=True)
+
+    async with app.run_test(size=(100, 30)):
+        app._set_model("flash")
+
+    reloaded = AeroConfig.create_default()
+    assert app.config.llm.model == "deepseek-v4-flash"
+    assert app.agent is not None
+    assert app.agent.config.llm.model == "deepseek-v4-flash"
+    assert app.agent.llm.config.model == "deepseek-v4-flash"
+    assert "DeepSeek V4 Flash" in app._input_meta_text()
+    assert reloaded.llm.model == "deepseek-v4-flash"

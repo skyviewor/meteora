@@ -1062,7 +1062,7 @@ class AgentLoop:
 
         try:
             text, tool_calls = await self.llm.chat_with_tools(self.messages, tools)
-            self.tracker.add_llm(self.llm.last_usage)
+            self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
             debug_log(
                 "agent.llm_response",
                 mode="non_stream",
@@ -1123,7 +1123,7 @@ class AgentLoop:
                     tool_calls.append(event.tool_call)
                     debug_log("agent.stream_tool_call", tool_name=event.tool_call.name)
                 elif event.type == "done":
-                    self.tracker.add_llm(event.usage)
+                    self.tracker.add_llm(event.usage, self.config.llm.model)
 
             tail = text_sanitizer.flush()
             if tail:
@@ -1263,7 +1263,7 @@ class AgentLoop:
         from aero.toolbox.builtin_tools import get_vision_usage, reset_vision_usage
         vision_usage = get_vision_usage()
         if vision_usage:
-            self.tracker.add_vision(vision_usage)
+            self.tracker.add_vision(vision_usage, self.config.vision.model)
             reset_vision_usage()
 
         if self._direct_response:
@@ -1272,7 +1272,7 @@ class AgentLoop:
             return response
 
         response = _sanitize_user_facing_text(await self.llm.chat(self.messages))
-        self.tracker.add_llm(self.llm.last_usage)
+        self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
         response = _inject_refs_if_missing(response, self._ref_urls)
         self.messages.append(Message(role="assistant", content=response))
         return response
@@ -1302,7 +1302,7 @@ class AgentLoop:
             from aero.toolbox.builtin_tools import get_vision_usage, reset_vision_usage
             vision_usage = get_vision_usage()
             if vision_usage:
-                self.tracker.add_vision(vision_usage)
+                self.tracker.add_vision(vision_usage, self.config.vision.model)
                 reset_vision_usage()
 
             if self._direct_response:
@@ -1331,7 +1331,7 @@ class AgentLoop:
                     pending_calls.append(event.tool_call)
                     debug_log("agent.stream_followup_tool_call", tool_name=event.tool_call.name)
                 elif event.type == "done":
-                    self.tracker.add_llm(event.usage)
+                    self.tracker.add_llm(event.usage, self.config.llm.model)
 
             tail = text_sanitizer.flush()
             if tail:

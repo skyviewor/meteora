@@ -537,7 +537,7 @@ def clear_llm_config(reset_provider: bool = False) -> dict:
     if reset_provider:
         preset = get_provider_preset("deepseek")
         config.llm.switch_provider("deepseek")
-        config.llm.model = preset.default_model if preset else "deepseek-chat"
+        config.llm.model = preset.default_model if preset else "deepseek-v4-flash"
         config.llm.base_url = preset.base_url if preset else ""
         provider_config = config.llm.provider_config("deepseek")
         provider_config.model = config.llm.model

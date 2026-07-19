@@ -25,6 +25,7 @@ from aero.cli.main import (
     _restore_confirmation_message,
     _save_user_theme,
     _help_text,
+    _has_persistable_session_messages,
     _assistant_claims_background_handoff,
     _is_subagent_tool_status,
     _normalize_checkpoint_title,
@@ -39,7 +40,7 @@ from aero.cli.main import (
     _usage_meta_text,
 )
 from aero.data import pricing
-from aero.data.pricing import ModelPrice, TokenTracker
+from aero.data.pricing import ModelPrice, ModelUsage, TokenTracker
 from aero.core.config import AeroConfig
 from aero.core.types import Message, ToolCall
 from aero.i18n import t
@@ -184,13 +185,15 @@ def test_theme_options_use_readable_labels():
 
 def test_usage_meta_text_formats_cache_hit_as_status_segment():
     tracker = TokenTracker(
-        prompt_tokens=1000,
-        completion_tokens=100,
-        cached_tokens=950,
+        _llm_usage={
+            "deepseek-v4-flash": ModelUsage(
+                prompt_tokens=1000, completion_tokens=100, cached_tokens=950
+            )
+        },
         current_prompt_tokens=43_300,
     )
 
-    text = _usage_meta_text(tracker, "deepseek-v4-flash", "qwen3.7-plus")
+    text = _usage_meta_text(tracker, "deepseek-v4-flash")
 
     assert "[dim]上下文[/dim] 43.3K [dim]/ 4%[/dim]" in text
     assert "[dim]命中缓存[/dim] 95%" in text
@@ -453,25 +456,44 @@ def test_vision_cost_uses_cached_input_price(monkeypatch):
             "prompt_tokens": 1000,
             "completion_tokens": 100,
             "prompt_tokens_details": {"cached_tokens": 800},
-        }
+        },
+        "test-vision-cache",
     )
 
     assert tracker.vision_cached_tokens == 800
-    assert tracker.vision_cost("test-vision-cache") == ((200 * 10) + (800 * 1) + (100 * 20)) / 1000
+    assert tracker.total_cost() == ((200 * 10) + (800 * 1) + (100 * 20)) / 1000
 
 
-def test_token_tracker_restores_legacy_vision_cache_field():
+def test_token_tracker_from_dict_defaults_missing_cached_tokens():
     tracker = TokenTracker.from_dict(
         {
-            "prompt_tokens": 1,
-            "completion_tokens": 2,
-            "vision_prompt_tokens": 3,
-            "vision_completion_tokens": 4,
+            "llm_usage": {"test": {"prompt_tokens": 1, "completion_tokens": 2}},
+            "vision_usage": {},
+            "current_prompt_tokens": 0,
         }
     )
 
-    assert tracker.vision_cached_tokens == 0
-    assert tracker.to_dict()["vision_cached_tokens"] == 0
+    assert tracker.cached_tokens == 0
+    assert tracker.to_dict()["llm_usage"]["test"]["cached_tokens"] == 0
+
+
+def test_token_tracker_from_dict_roundtrip_preserves_per_model_usage():
+    original = TokenTracker()
+    original.add_llm(
+        {"prompt_tokens": 100, "completion_tokens": 50, "prompt_tokens_details": {"cached_tokens": 30}},
+        "deepseek-v4-pro",
+    )
+    original.add_llm(
+        {"prompt_tokens": 200, "completion_tokens": 80},
+        "kimi-k2.6",
+    )
+
+    restored = TokenTracker.from_dict(original.to_dict())
+
+    assert restored.prompt_tokens == 300
+    assert restored.completion_tokens == 130
+    assert restored.cached_tokens == 30
+    assert restored.total_cost() == original.total_cost()
 
 
 def test_exit_session_save_is_idempotent():
@@ -484,6 +506,18 @@ def test_exit_session_save_is_idempotent():
     AeroApp._save_session_on_exit(app)
 
     assert calls == ["saved"]
+
+
+def test_auto_save_ignores_display_only_local_interactions():
+    app = AeroApp.__new__(AeroApp)
+    app.agent = SimpleNamespace(messages=[Message(role="system", content="system")])
+    app._chat_transcript = lambda: [
+        {"role": "user", "content": "sk-a...1234"},
+        {"role": "assistant", "content": "API Key 已保存"},
+    ]
+    app._get_experiment_mgr = lambda: pytest.fail("local interaction must not be saved")
+
+    AeroApp._auto_save_session(app)
 
 
 @pytest.mark.parametrize("continue_flag", ["--continue", "-c"])
@@ -645,6 +679,22 @@ def test_session_title_skips_greeting_and_summarizes_request():
     assert _session_title_from_messages(messages) == "下载 2025 年 7 月 8 日的 ERA5…"
 
 
+def test_only_agent_conversation_messages_are_persistable_sessions():
+    assert _has_persistable_session_messages([Message(role="system", content="system")]) is False
+    assert _has_persistable_session_messages(
+        [
+            Message(role="system", content="system"),
+            Message(role="user", content="[compact_summary]\nold context"),
+        ]
+    ) is False
+    assert _has_persistable_session_messages(
+        [
+            Message(role="system", content="system"),
+            Message(role="user", content="下载 ERA5 数据"),
+        ]
+    ) is True
+
+
 def test_session_title_falls_back_to_greeting_when_only_greeting_exists():
     messages = [Message(role="user", content="你好")]
 
@@ -751,3 +801,25 @@ def test_user_theme_preference_persists(tmp_path, monkeypatch):
     text = pref_path.read_text()
     assert "density: compact" in text
     assert "theme: dracula" in text
+
+
+@pytest.mark.asyncio
+async def test_chat_input_uses_compact_editor_rows_without_vertical_inset(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    app = AeroApp(AeroConfig.create_default(), persist_config=False)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        input_box = app.query_one("#input-box")
+        user_input = app.query_one("#user-input")
+        input_meta = app.query_one("#input-meta")
+
+        assert input_box.region.height == 5
+        assert user_input.region.height == 2
+        assert user_input.styles.padding.top == 0
+        assert user_input.styles.padding.bottom == 0
+        assert user_input.content_region.height == 2
+        assert input_meta.region.height == 1

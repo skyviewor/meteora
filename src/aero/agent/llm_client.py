@@ -57,7 +57,7 @@ class StreamEvent:
 @dataclass
 class LLMConfig:
     provider: str = "deepseek"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-flash"
     reasoning_effort: str = ""
     api_key: str = ""
     base_url: str = ""
@@ -154,7 +154,7 @@ class LLMClient:
         tool_calls_raw = msg.get("tool_calls") or []
         tool_calls = [
             ToolCall(
-                id=tc.get("id", f"call_{i}"),
+                id=tc.get("id") or f"call_{i}",
                 name=tc["function"]["name"],
                 arguments=_parse_args(tc["function"].get("arguments", "")),
             )
@@ -219,7 +219,7 @@ class LLMClient:
                                 yield StreamEvent(
                                     type="tool_call",
                                     tool_call=ToolCall(
-                                        id=buf.get("id", f"call_{idx}"),
+                                        id=buf.get("id") or f"call_{idx}",
                                         name=fn_name,
                                         arguments=fn_args,
                                     ),
@@ -331,8 +331,8 @@ class LLMClient:
     @staticmethod
     def _format_msg(m: Message) -> dict:
         msg: dict = {"role": m.role, "content": m.content}
-        if m.tool_call_id:
-            msg["tool_call_id"] = m.tool_call_id
+        if m.role == "tool" or m.tool_call_id:
+            msg["tool_call_id"] = m.tool_call_id or ""
         if m.tool_calls:
             msg["tool_calls"] = [
                 {

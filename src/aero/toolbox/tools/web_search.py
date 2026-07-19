@@ -55,14 +55,20 @@ async def search_web(
 ) -> dict:
     """Search current web content using the configured Bailian credential."""
     config = find_config()
-    api_key = config.vision.api_key.strip()
+    api_key = config.web_search.api_key.strip()
+    credential_reused = False
+    if not api_key:
+        # Existing installations used the vision credential for search. Keep
+        # that behaviour as a fallback while new setups store it separately.
+        api_key = config.vision.api_key.strip()
+        credential_reused = bool(api_key)
     if not api_key:
         return {
             "found": False,
             "api_key_configured": False,
             "credential_reused": False,
             "error": "尚未配置百炼 API Key，联网搜索暂不可用。",
-            "message": "请先配置视觉模型使用的百炼 API Key；联网搜索会自动复用该凭证。",
+            "message": "请先配置百炼 API Key，联网搜索功能依赖该凭证。",
             "references": [WEB_SEARCH_CONSOLE_URL],
         }
 
@@ -77,15 +83,15 @@ async def search_web(
     except ValueError as exc:
         return {"found": False, "error": str(exc)}
     except Exception as exc:
-        return _search_error(_exception_text(exc))
+        return _search_error(_exception_text(exc), credential_reused=credential_reused)
 
     result.update(
         {
             "query": query.strip(),
             "provider": "阿里云百炼联网搜索",
             "api_key_configured": True,
-            "credential_reused": True,
-            "credential_source": "视觉模型的百炼配置",
+            "credential_reused": credential_reused,
+            "credential_source": "视觉模型 API Key" if credential_reused else "联网搜索 API Key",
         }
     )
     if not result["found"]:
@@ -93,11 +99,11 @@ async def search_web(
     return result
 
 
-def _search_error(error: str) -> dict:
+def _search_error(error: str, *, credential_reused: bool) -> dict:
     lowered = error.lower()
     if "session terminated" in lowered or "401" in lowered or "403" in lowered:
         message = (
-            "已复用视觉模型配置的百炼 API Key，无需重新提供或配置 Key。"
+            "已使用已配置的百炼 API Key，无需重新提供或配置 Key。"
             "百炼拒绝建立联网搜索会话，通常是因为当前账号尚未在 MCP 市场启用 "
             "WebSearch、服务协议尚未确认，或搜索额度已经用尽。"
         )
@@ -111,8 +117,8 @@ def _search_error(error: str) -> dict:
     return {
         "found": False,
         "api_key_configured": True,
-        "credential_reused": True,
-        "credential_source": "视觉模型的百炼配置",
+        "credential_reused": credential_reused,
+        "credential_source": "视觉模型 API Key" if credential_reused else "联网搜索 API Key",
         "action_required": action_required,
         "error": message,
         "references": [WEB_SEARCH_CONSOLE_URL, WEB_SEARCH_GUIDE_URL],

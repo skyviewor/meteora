@@ -1,6 +1,6 @@
 llm:
   provider: deepseek
-  model: deepseek-chat
+  model: deepseek-v4-flash
   reasoning_effort: ""
   base_url: ""
   providers: {}
@@ -11,6 +11,12 @@ vision:
   api_key: ""
   base_url: ""
   cache_ttl_hours: 3
+
+web_search:
+  provider: bailian
+  model: qwen-turbo
+  api_key: ""
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
 
 email:
   enabled: false

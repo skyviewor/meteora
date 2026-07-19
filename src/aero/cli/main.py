@@ -25,6 +25,7 @@ if os.environ.get("AERO_ENABLE_KITTY_KEY") != "1":
     os.environ["TEXTUAL_DISABLE_KITTY_KEY"] = "1"
 
 from rich.markup import escape
+from rich.table import Table
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -33,7 +34,6 @@ from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.scrollbar import ScrollBarRender
 from textual.widgets import (
-    Button,
     ListItem,
     ListView,
     Markdown,
@@ -81,6 +81,7 @@ from aero.core.config import (
     clear_llm_api_key,
     save_llm_profile,
     save_vision_api_key,
+    save_web_search_api_key,
 )
 from aero.core.debug_log import configure_debug_logging, debug_log
 from aero.core.llm_providers import (
@@ -103,8 +104,6 @@ DEEPSEEK_MODEL_ALIASES = {
     "v4-flash": "deepseek-v4-flash",
     "pro": "deepseek-v4-pro",
     "v4-pro": "deepseek-v4-pro",
-    "chat": "deepseek-chat",
-    "reasoner": "deepseek-reasoner",
 }
 REASONING_EFFORTS = {"low", "medium", "high", "max", "xhigh"}
 DEEPSEEK_API_KEYS_URL = "https://platform.deepseek.com/api_keys"
@@ -666,7 +665,7 @@ class SelectScreen(ModalScreen[str | None]):
     def __init__(
         self,
         title: str,
-        options: list[tuple[str, str]],
+        options: list[tuple[str, Any]],
         current: str,
         lang: str = "zh",
         on_highlight: Callable[[str], None] | None = None,
@@ -718,6 +717,15 @@ class SelectScreen(ModalScreen[str | None]):
             self._on_highlight("" if event.option.id == "auto" else event.option.id)
 
     def on_key(self, event: events.Key) -> None:
+        if event.key in {"up", "down"}:
+            event.stop()
+            event.prevent_default()
+            option_list = self.query_one("#select-list", OptionList)
+            if event.key == "up":
+                option_list.action_cursor_up()
+            else:
+                option_list.action_cursor_down()
+            return
         if event.key not in {"backspace", "delete"} or self._on_delete is None:
             return
         event.stop()
@@ -742,9 +750,15 @@ class SelectScreen(ModalScreen[str | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
-    def _option_prompt(self, value: str, label: str) -> str:
+    def _option_prompt(self, value: str, label: Any) -> Any:
         selected = "●" if (value or "auto") == (self._current or "auto") else " "
-        return f"{selected} {label}"
+        if isinstance(label, str):
+            return f"{selected} {label}"
+        prompt = Table.grid(expand=True, padding=0)
+        prompt.add_column(width=2, no_wrap=True)
+        prompt.add_column(ratio=1, no_wrap=True)
+        prompt.add_row(selected, label)
+        return prompt
 
 
 class ChatTextArea(TextArea):
@@ -1203,6 +1217,7 @@ class AeroApp(App):
     #user-input {
         width: 100%;
         height: 2;
+        padding: 0;
         border: none;
         background: $surface;
         scrollbar-size: 0 0;
@@ -1527,6 +1542,166 @@ class AeroApp(App):
         elif self._resume_last_session:
             self._resume_latest_project_session()
 
+        if self.persist_config and _config_needs_llm_setup(self.config):
+            self.call_after_refresh(self._open_first_run_setup)
+
+    def _open_first_run_setup(self) -> None:
+        from aero.cli.setup_wizard import FirstRunSetupScreen
+
+        self.push_screen(FirstRunSetupScreen(), self._complete_first_run_setup)
+
+    def _complete_first_run_setup(self, result: dict | None) -> None:
+        if result is None:
+            self.exit(message="未完成主模型配置，已退出。")
+            return
+        primary = result["primary"]
+        self.config.llm.provider = str(primary["provider"])
+        self.config.llm.model = str(primary["model"])
+        self.config.llm.base_url = str(primary["base_url"])
+        self.config.llm.supports_vision = bool(result["primary_supports_vision"])
+        self.config.llm.set_active_api_key(str(primary["api_key"]))
+        save_llm_profile(
+            self.config.llm.provider,
+            str(primary["api_key"]),
+            self.config.llm.model,
+            self.config.llm.base_url,
+        )
+
+        vision = result["vision"]
+        self.config.vision.mode = str(vision["mode"])
+        if self.config.vision.mode == "separate":
+            self.config.vision.provider = str(vision["provider"])
+            self.config.vision.model = str(vision["model"])
+            self.config.vision.base_url = str(vision["base_url"])
+            self.config.vision.api_key = str(vision["api_key"])
+            from aero.core.config import save_vision_api_key
+
+            save_vision_api_key(
+                self.config.vision.api_key,
+                self.config.vision.base_url,
+                provider=self.config.vision.provider,
+                model=self.config.vision.model,
+            )
+
+        web_search = result.get("web_search", {})
+        if web_search.get("configured"):
+            ws_api_key = web_search.get("api_key", "").strip()
+            if ws_api_key:
+                self.config.web_search.provider = str(web_search.get("provider", "bailian"))
+                self.config.web_search.api_key = ws_api_key
+                self.config.web_search.base_url = str(
+                    web_search.get(
+                        "base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                    )
+                )
+                self.config.web_search.model = str(web_search.get("model", "qwen-turbo"))
+                save_web_search_api_key(
+                    ws_api_key,
+                    self.config.web_search.base_url,
+                    provider=self.config.web_search.provider,
+                    model=self.config.web_search.model,
+                )
+
+        _save_config(self.config)
+        self._init_agent()
+        self._chat_log = [
+            t("app.title", self.config.language),
+            self._model_status_text(markup=False),
+            "",
+        ]
+        self._refresh_model_info()
+        self._set_footer_status("主模型已配置，可以开始对话。")
+
+    def _open_provider_setup(self, previous_provider: str) -> None:
+        from aero.cli.setup_wizard import FirstRunSetupScreen
+
+        primary = {
+            "provider": self.config.llm.provider,
+            "model": self.config.llm.model,
+            "base_url": self.config.llm.base_url,
+        }
+        self.push_screen(
+            FirstRunSetupScreen(primary_only=True, primary=primary),
+            lambda result: self._complete_provider_setup(result, previous_provider),
+        )
+
+    def _complete_provider_setup(
+        self,
+        result: dict | None,
+        previous_provider: str,
+    ) -> None:
+        if result is None:
+            self.config.llm.switch_provider(previous_provider)
+            self._sync_agent_llm_config()
+            if self.persist_config:
+                _save_config(self.config)
+            self._refresh_model_info()
+            self._set_footer_status("已取消配置，恢复原模型服务商。")
+            return
+
+        primary = result["primary"]
+        self.config.llm.provider = str(primary["provider"])
+        self.config.llm.model = str(primary["model"])
+        self.config.llm.base_url = str(primary["base_url"])
+        self.config.llm.supports_vision = bool(result["primary_supports_vision"])
+        self.config.llm.set_active_api_key(str(primary["api_key"]))
+        self.config.llm.apply_active_provider_defaults()
+        save_llm_profile(
+            self.config.llm.provider,
+            str(primary["api_key"]),
+            self.config.llm.model,
+            self.config.llm.base_url,
+        )
+        if self.persist_config:
+            _save_config(self.config)
+        self._sync_agent_llm_config()
+        self._refresh_model_info()
+        self._set_footer_status(
+            f"{_display_provider_name(self.config.llm.provider)} 已配置并切换。"
+        )
+
+    def _sync_agent_llm_config(self) -> None:
+        if self.agent is None:
+            return
+        self.agent.llm.config.provider = self.config.llm.provider
+        self.agent.llm.config.base_url = self.config.llm.base_url
+        self.agent.llm.config.model = self.config.llm.model
+        self.agent.llm.config.api_key = self.config.llm.active_api_key()
+        self.agent.config.llm.provider = self.config.llm.provider
+        self.agent.config.llm.base_url = self.config.llm.base_url
+        self.agent.config.llm.model = self.config.llm.model
+        self.agent.config.llm.set_active_api_key(self.config.llm.active_api_key())
+
+    async def _open_vision_setup_for_current_task(self) -> bool:
+        from aero.cli.setup_wizard import FirstRunSetupScreen
+
+        result = await self.push_screen_wait(
+            FirstRunSetupScreen(
+                vision_only=True,
+                primary_supports_vision=self.config.llm.supports_vision,
+            )
+        )
+        if result is None or result["vision"]["mode"] == "unconfigured":
+            return False
+        vision = result["vision"]
+        self.config.vision.mode = str(vision["mode"])
+        if self.config.vision.mode == "separate":
+            self.config.vision.provider = str(vision["provider"])
+            self.config.vision.model = str(vision["model"])
+            self.config.vision.base_url = str(vision["base_url"])
+            self.config.vision.api_key = str(vision["api_key"])
+            from aero.core.config import save_vision_api_key
+
+            save_vision_api_key(
+                self.config.vision.api_key,
+                self.config.vision.base_url,
+                provider=self.config.vision.provider,
+                model=self.config.vision.model,
+            )
+        _save_config(self.config)
+        self._set_footer_status("视觉能力已配置，正在继续当前任务。")
+        return True
+
     def _set_input_focus_style(self, active: bool) -> None:
         input_box = self.query_one("#input-box")
         input_box.set_class(active, "input-active")
@@ -1735,7 +1910,6 @@ class AeroApp(App):
             text += _usage_meta_text(
                 self.agent.tracker,
                 self.config.llm.model,
-                self.config.vision.model,
             )
         return text
 
@@ -2287,8 +2461,8 @@ class AeroApp(App):
             _save_config(self.config)
 
         message = (
-            "视觉模型的百炼 API Key 已在本地更新。主聊天模型没有切换；"
-            "联网搜索会自动复用这份凭证。"
+            "百炼 API Key 已在本地更新。主聊天模型没有切换；"
+            "联网搜索会自动使用该凭证。"
         )
         agent_msg = await self._mount_agent_message()
         await agent_msg.update(message)
@@ -2303,13 +2477,13 @@ class AeroApp(App):
         configured = bool(self.config.vision.api_key)
         if configured:
             message = (
-                "已直接复用视觉模型配置中的百炼 API Key。无需再次提供密钥，"
+                "已使用已配置的百炼 API Key。无需再次提供密钥，"
                 "也不会切换主聊天模型。联网搜索是否可用还取决于百炼账户"
                 "是否已启用 WebSearch MCP 服务。"
             )
         else:
             message = (
-                "当前没有检测到视觉模型的百炼 API Key。请明确输入"
+                "当前没有检测到百炼 API Key。请明确输入"
                 "“配置视觉模型 API Key：<你的 Key>”，"
                 "密钥会在本地保存并在界面中脱敏。"
             )
@@ -4055,7 +4229,11 @@ class AeroApp(App):
 
     def _auto_save_session(self, name: str = "", title_source: str = "") -> None:
         transcript = self._chat_transcript()
-        if self.agent is None or (len(self.agent.messages) <= 1 and not transcript):
+        # Local UI interactions (for example API-key setup and `/checkpoints`)
+        # only appear in the display transcript. They never enter the Agent
+        # context, so persisting them as standalone sessions produces noisy
+        # history entries and can expose a redacted fragment as a title.
+        if self.agent is None or not _has_persistable_session_messages(self.agent.messages):
             return
         active_experiment = self._get_experiment_mgr().active()
         if active_experiment is not None:
@@ -4077,17 +4255,6 @@ class AeroApp(App):
         elif existing is not None and existing[1].name:
             name = existing[1].name
             source = existing[1].title_source
-        elif len(self.agent.messages) <= 1 and transcript:
-            first_line = next(
-                (
-                    line.strip(" #*`_")
-                    for line in transcript[0]["content"].splitlines()
-                    if line.strip()
-                ),
-                "本地命令记录",
-            )
-            name = _normalize_generated_session_title(first_line) or "本地命令记录"
-            source = "local"
         else:
             name = _session_title_from_messages(self.agent.messages) or sid
             source = "pending"
@@ -4774,9 +4941,15 @@ class AeroApp(App):
             chat.mount(Static(t("error.model_empty", lang)))
             return
         self.config.llm.model = model
-        if self.agent is not None:
-            self.agent.llm.config.model = model
+        self.config.llm.apply_active_provider_defaults()
+        self._sync_agent_llm_config()
         if self.persist_config:
+            save_llm_profile(
+                self.config.llm.provider,
+                self.config.llm.active_api_key(),
+                self.config.llm.model,
+                self.config.llm.base_url,
+            )
             _save_config(self.config)
         self._refresh_model_info()
         self._set_footer_status(t("app.model_switched", lang).format(
@@ -4801,15 +4974,7 @@ class AeroApp(App):
             if not provider_config.model:
                 provider_config.model = preset.default_model
             self.config.llm.use_provider_settings()
-        if self.agent is not None:
-            self.agent.llm.config.provider = self.config.llm.provider
-            self.agent.llm.config.base_url = self.config.llm.base_url
-            self.agent.llm.config.model = self.config.llm.model
-            self.agent.llm.config.api_key = self.config.llm.active_api_key()
-            self.agent.config.llm.provider = self.config.llm.provider
-            self.agent.config.llm.base_url = self.config.llm.base_url
-            self.agent.config.llm.model = self.config.llm.model
-            self.agent.config.llm.set_active_api_key(self.config.llm.active_api_key())
+        self._sync_agent_llm_config()
         if self.persist_config:
             _save_config(self.config)
         self._refresh_model_info()
@@ -4817,9 +4982,15 @@ class AeroApp(App):
             provider=_display_provider_name(provider),
             model=self.config.llm.model,
         )
-        if previous_provider != provider and not self.config.llm.active_api_key():
-            status += "，当前服务商还没有 API key"
+        missing_api_key = (
+            previous_provider != provider
+            and not self.config.llm.active_api_key()
+        )
+        if missing_api_key:
+            status += "，请完成 API Key 配置"
         self._set_footer_status(status)
+        if missing_api_key:
+            self.call_after_refresh(self._open_provider_setup, previous_provider)
 
     def _set_reasoning_effort(self, value: str) -> None:
         lang = self.config.language
@@ -5082,6 +5253,7 @@ class AeroApp(App):
             response_text = ""
             content_blocked = False
             status_auto_collapsed = False
+            vision_setup_requested = False
 
             def maybe_handoff_claimed_background(status_text: str) -> bool:
                 if state.background_task is not None:
@@ -5128,6 +5300,12 @@ class AeroApp(App):
                         self._maybe_scroll_to_end()
                     elif event.type == "status":
                         state.phase = "tool"
+                        if (
+                            not vision_setup_requested
+                            and _vision_setup_required(event.content)
+                        ):
+                            vision_setup_requested = True
+                            await self._open_vision_setup_for_current_task()
                         maybe_handoff_claimed_background(event.content)
                         if state.background_task is not None:
                             self._subagents.update(state.background_task.id, event.content)
@@ -5685,7 +5863,14 @@ def _save_user_theme(theme: str) -> None:
 
 
 def _config_needs_llm_setup(config: AeroConfig) -> bool:
-    return not config.llm.api_key or config.llm.api_key.startswith("$")
+    """A primary model is required before an interactive chat can begin."""
+    api_key = config.llm.active_api_key()
+    return not api_key or api_key.startswith("$")
+
+
+def _vision_setup_required(status_text: str) -> bool:
+    """Identify the structured missing-vision result emitted by analyze_image."""
+    return '"setup_required": "vision"' in status_text
 
 
 def _extract_llm_api_key(text: str) -> str:
@@ -5784,6 +5969,21 @@ def _mentions_data_credentials(text: str) -> bool:
     )
 
 
+def _mentions_web_search(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "联网搜索",
+            "搜索功能",
+            "search_web",
+            "web search",
+            "websearch",
+            "search the web",
+        )
+    )
+
+
 def _looks_like_llm_setup_intent(text: str) -> bool:
     lowered = text.lower()
     if _mentions_vision_model(text):
@@ -5791,6 +5991,8 @@ def _looks_like_llm_setup_intent(text: str) -> bool:
     if _mentions_email(text):
         return False
     if _mentions_data_credentials(text):
+        return False
+    if _mentions_web_search(text):
         return False
     markers = [
         "api key",
@@ -5821,6 +6023,8 @@ def _parse_llm_clear_from_text(text: str) -> dict | None:
     if _mentions_email(text):
         return None
     if _mentions_data_credentials(text):
+        return None
+    if _mentions_web_search(text):
         return None
     llm_markers = (
         "api key",
@@ -5873,11 +6077,11 @@ def _infer_llm_provider_model(text: str, config: AeroConfig) -> tuple[str, str, 
     qwen_match = re.search(r"\b(qwen[\w.-]*)\b", lowered)
     if qwen_match or "通义" in text or "百炼" in text:
         provider = "bailian"
-        model = qwen_match.group(1) if qwen_match else model or "qwen-plus"
+        model = qwen_match.group(1) if qwen_match else model or "qwen3.7-plus"
     elif "kimi" in lowered or "moonshot" in lowered or "月之暗面" in text:
         provider = "kimi"
         model_match = re.search(r"\b(kimi-(?:k2|k)[\w.-]*)\b", lowered)
-        model = model_match.group(1) if model_match else "kimi-k2.6"
+        model = model_match.group(1) if model_match else "kimi-k3"
     elif "deepseek" in lowered or "深度求索" in text:
         provider = "deepseek"
         model_match = re.search(r"\b(deepseek[\w.-]*)\b", lowered)
@@ -6029,21 +6233,23 @@ def _normalize_reasoning_effort(value: str) -> str | None:
     return None
 
 
-def _model_options(provider: str) -> list[tuple[str, str]]:
+def _model_options(provider: str) -> list[tuple[str, Any]]:
+    from aero.cli.setup_wizard import model_option_prompt
+
     preset = get_provider_preset(provider)
-    if preset is not None:
-        return [
-            (model, f"{model}    {preset.name}")
-            for model in preset.models
-        ]
-    if provider == "deepseek":
-        return [
-            ("deepseek-v4-pro", "DeepSeek V4 Pro    DeepSeek"),
-            ("deepseek-v4-flash", "DeepSeek V4 Flash  DeepSeek"),
-            ("deepseek-chat", "DeepSeek Chat      DeepSeek"),
-            ("deepseek-reasoner", "DeepSeek Reasoner  DeepSeek"),
-        ]
-    return []
+    if preset is None:
+        return []
+    return [
+        (
+            model,
+            model_option_prompt(
+                provider,
+                model,
+                recommended=model == preset.default_model,
+            ),
+        )
+        for model in preset.models
+    ]
 
 
 def _variant_options() -> list[tuple[str, str]]:
@@ -6085,8 +6291,6 @@ def _display_model_name(model: str) -> str:
     names = {
         "deepseek-v4-pro": "DeepSeek V4 Pro",
         "deepseek-v4-flash": "DeepSeek V4 Flash",
-        "deepseek-chat": "DeepSeek Chat",
-        "deepseek-reasoner": "DeepSeek Reasoner",
     }
     return names.get(model, model)
 
@@ -6125,21 +6329,18 @@ def _vision_configured(config: AeroConfig) -> bool:
     return bool(config.vision.model and config.vision.api_key)
 
 
-def _usage_meta_text(tracker: TokenTracker, llm_model: str, vision_model: str) -> str:
+def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
     ctx_win = context_window_for(llm_model)
     ctx_tokens = tracker.current_prompt_tokens or tracker.total_tokens
-    pct = ctx_tokens * 100 / ctx_win if ctx_win > 0 else 0
-    parts = [
-        (
-            "[dim]上下文[/dim] "
-            f"{escape(format_token_count(ctx_tokens))} "
-            f"[dim]/ {pct:.0f}%[/dim]"
-        )
-    ]
+    context_text = f"[dim]上下文[/dim] {escape(format_token_count(ctx_tokens))}"
+    if ctx_win is not None and ctx_win > 0:
+        pct = ctx_tokens * 100 / ctx_win
+        context_text += f" [dim]/ {pct:.0f}%[/dim]"
+    parts = [context_text]
     hit_ratio = tracker.cache_ratio()
     if hit_ratio > 0:
         parts.append(f"[dim]命中缓存[/dim] {hit_ratio:.0%}")
-    cost = tracker.total_cost(llm_model, vision_model)
+    cost = tracker.total_cost()
     if cost > 0:
         parts.append(escape(format_cost(cost)))
     return " [dim]|[/dim] " + " [dim]·[/dim] ".join(parts)
@@ -6383,6 +6584,16 @@ def _session_title_from_messages(messages: list[Message], max_len: int = 24) -> 
     if candidates:
         return _truncate_session_title(candidates[0], max_len)
     return ""
+
+
+def _has_persistable_session_messages(messages: list[Message]) -> bool:
+    """Return whether an agent conversation contains an actual user request."""
+    return any(
+        message.role == "user"
+        and message.content.strip()
+        and not message.content.startswith("[compact_summary]")
+        for message in messages
+    )
 
 
 def _checkpoint_title_from_messages(messages: list[Message], max_len: int = 18) -> str:
@@ -7092,11 +7303,6 @@ def main():
         )
 
         config = _load_config()
-
-        if _config_needs_llm_setup(config):
-            if not _run_llm_setup_wizard(config):
-                print("未完成模型配置，退出。")
-                sys.exit(1)
 
         app = AeroApp(config, resume_last_session=resume_last_session)
         app.run(mouse=mouse_mode)
