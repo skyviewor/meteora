@@ -4,17 +4,21 @@ import pytest
 
 from aero.cli.main import (
     AeroApp,
+    SecretInputScreen,
+    _extract_cds_credentials,
     _extract_llm_api_key,
     _is_bare_api_key,
+    _mask_cds_credentials,
     _mask_secret_text,
     _parse_llm_clear_from_text,
     _parse_llm_setup_from_text,
-    _requests_vision_key_reuse,
+    _requests_primary_vision_reuse,
     _usage_meta_text,
 )
-from aero.core.config import AeroConfig
+from aero.core.config import AeroConfig, resolved_vision_config
 from aero.core.llm_providers import BUILTIN_LLM_PROVIDERS
 from aero.data.pricing import TokenTracker, context_window_for
+from aero.toolbox.secret_input import SecretInputRequest
 
 
 def test_parse_qwen_setup_uses_bailian():
@@ -30,6 +34,39 @@ def test_parse_qwen_setup_uses_bailian():
     assert setup["model"] == "qwen3.7-plus"
     assert setup["base_url"] == "https://dashscope.aliyuncs.com/compatible-mode/v1"
     assert setup["api_key"] == "sk-test-0004"
+
+
+@pytest.mark.asyncio
+async def test_secret_input_keyboard_actions_do_not_require_mouse():
+    app = AeroApp(AeroConfig.create_default(), persist_config=False)
+    result: list[str | None] = []
+    request = SecretInputRequest("cds", "输入 CDS API 凭证", "url: ...\nkey: ...", True)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(SecretInputScreen(request), callback=result.append)
+        await pilot.pause()
+        assert app.focused is not None
+        assert app.focused.id == "secret-input-value"
+
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.screen._action_focused is True
+
+        await pilot.press("right", "enter")
+        await pilot.pause()
+
+    assert result == [None]
+
+
+def test_extract_official_cds_two_line_credentials_before_generic_api_key():
+    text = "url: https://cds.climate.copernicus.eu/api\nkey: ee3a1234-5678-9012"
+
+    assert _extract_cds_credentials(text) == (
+        "https://cds.climate.copernicus.eu/api",
+        "ee3a1234-5678-9012",
+    )
+    assert "ee3a1234-5678-9012" not in _mask_cds_credentials(text)
+    assert "ee3a...9012" in _mask_cds_credentials(text)
 
 
 def test_parse_kimi_provider_does_not_use_provider_name_as_model():
@@ -132,9 +169,33 @@ def test_bare_api_key_detection():
     assert _is_bare_api_key("请使用 sk-test-0004 配置视觉模型") is False
 
 
-def test_detect_vision_key_reuse_request():
-    assert _requests_vision_key_reuse("你直接复用视觉模型的 API Key") is True
-    assert _requests_vision_key_reuse("切换主模型 API Key") is False
+def test_detect_primary_vision_reuse_request():
+    assert _requests_primary_vision_reuse("你直接复用视觉模型的 API Key") is True
+    assert _requests_primary_vision_reuse("复用主模型") is True
+    assert _requests_primary_vision_reuse("切换主模型 API Key") is False
+
+
+@pytest.mark.asyncio
+async def test_reuse_primary_vision_uses_active_kimi_profile():
+    config = AeroConfig.create_default()
+    config.llm.provider = "kimi"
+    kimi = config.llm.provider_config("kimi")
+    kimi.model = "kimi-k2.6"
+    kimi.base_url = "https://api.moonshot.cn/v1"
+    kimi.api_key = "sk-kimi-test"
+    config.llm.use_provider_settings()
+    app = AeroApp(config, persist_config=False)
+
+    async with app.run_test(size=(100, 30)):
+        await app._process("复用主模型")
+
+    vision = resolved_vision_config(config)
+    assert vision is not None
+    assert vision.provider == "kimi"
+    assert vision.model == "kimi-k2.6"
+    transcript = "\n".join(app._chat_log)
+    assert "Kimi/kimi-k2.6" in transcript
+    assert "bailian/qwen3.7-plus" not in transcript
 
 
 @pytest.mark.asyncio
@@ -153,10 +214,12 @@ async def test_bare_api_key_is_masked_and_never_starts_agent():
 
 
 def test_detect_vision_setup_result():
-    from aero.cli.main import _vision_setup_required
+    from aero.cli.main import _credential_setup_scope, _vision_setup_required
 
     assert _vision_setup_required('{"status": "not_configured", "setup_required": "vision"}')
     assert not _vision_setup_required('{"status": "success"}')
+    assert _credential_setup_scope('{"setup_required": "cds"}') == "cds"
+    assert _credential_setup_scope('{"setup_required": "vision"}') is None
 
 
 def test_all_builtin_models_have_explicit_context_windows():
@@ -166,11 +229,9 @@ def test_all_builtin_models_have_explicit_context_windows():
         for model in preset.models
     }
 
-    assert len(models) == 19
+    assert len(models) == 12
     assert all(context_window_for(model) is not None for model in models)
     assert context_window_for("qwen3.6-flash") == 1_000_000
-    assert context_window_for("MiniMax-M3") == 1_000_000
-    assert context_window_for("minimax-m3") == 1_000_000
 
 
 def test_unknown_model_has_no_assumed_context_window():

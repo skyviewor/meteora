@@ -7,12 +7,14 @@ import re
 from typing import Any
 from urllib.parse import quote, urlsplit, urlunsplit
 
+import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 WEB_SEARCH_MCP_URL = "https://dashscope.aliyuncs.com/api/v1/mcps/WebSearch/mcp"
 WEB_SEARCH_CONSOLE_URL = "https://bailian.console.aliyun.com/cn-beijing/"
-WEB_SEARCH_GUIDE_URL = "https://help.aliyun.com/zh/model-studio/mcp-external-calls"
+WEB_SEARCH_GUIDE_URL = "https://help.aliyun.com/zh/model-studio/web-search-for-coding-plan"
+ZHIPU_WEB_SEARCH_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
 
 _URL_RE = re.compile(r"https?://[^\s<>'\"\])}]+")
 _QUERY_FIELDS = ("query", "q", "keyword", "keywords", "search_query")
@@ -42,6 +44,46 @@ async def search_bailian_web(
         domains=_clean_domains(domains or []),
     )
     return _normalize_search_response(raw, limit=max(1, min(limit, 10)))
+
+
+async def check_bailian_web(api_key: str) -> str:
+    """Verify the Bailian WebSearch MCP service without running a query."""
+    headers = {"Authorization": f"Bearer {api_key.strip()}"}
+    async with streamablehttp_client(WEB_SEARCH_MCP_URL, headers=headers) as streams:
+        read, write, _ = streams
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tool = _select_search_tool((await session.list_tools()).tools)
+            return tool.name
+
+
+async def search_zhipu_web(
+    api_key: str, query: str, *, limit: int = 8,
+    freshness_days: int | None = None, domains: list[str] | None = None,
+    base_url: str = ZHIPU_WEB_SEARCH_URL,
+) -> dict[str, Any]:
+    payload = {
+        "search_query": query.strip(),
+        "search_engine": "search_std",
+        "search_intent": False,
+        "count": max(1, min(limit, 50)),
+        "content_size": "medium",
+    }
+    if freshness_days:
+        payload["search_recency_filter"] = (
+            "day" if freshness_days <= 1 else "week" if freshness_days <= 7
+            else "month" if freshness_days <= 30 else "year"
+        )
+    if domains:
+        payload["search_domain_filter"] = domains[0]
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            base_url, headers={"Authorization": f"Bearer {api_key}"}, json=payload
+        )
+        _raise_search_error(response, "智谱 AI")
+    body = response.json()
+    raw = {"structured": {"results": body.get("search_result", [])}, "text": "", "is_error": False}
+    return _normalize_search_response(raw, limit=limit)
 
 
 async def _call_search_mcp(
@@ -77,6 +119,20 @@ async def _call_search_mcp(
                 "text": "\n".join(text_blocks).strip(),
                 "structured": getattr(result, "structuredContent", None),
             }
+
+
+def _raise_search_error(response: httpx.Response, provider: str) -> None:
+    """Raise an exception retaining the provider's actionable error message."""
+    if response.is_success:
+        return
+    detail = ""
+    try:
+        payload = response.json()
+        detail = json.dumps(payload, ensure_ascii=False)
+    except (ValueError, json.JSONDecodeError):
+        detail = response.text
+    detail = detail.strip()[:2000]
+    raise RuntimeError(f"{provider} HTTP {response.status_code}: {detail}")
 
 
 def _select_search_tool(tools: list[Any]) -> Any:

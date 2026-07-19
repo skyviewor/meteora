@@ -32,6 +32,7 @@ BLOCKED_IN_PLAN: set[str] = {
     "ensure_runtime_tools",
     "delete_file",
     "configure_cds_key",
+    "request_secret_input",
     "configure_llm_provider",
     "clear_llm_config",
     "configure_vision_model",

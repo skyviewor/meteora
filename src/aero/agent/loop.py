@@ -28,6 +28,17 @@ from aero.toolbox.registry import get_registry
 
 logger = structlog.get_logger()
 
+_MAX_VISION_ANALYSES_PER_TURN = 2
+
+
+def _image_fingerprint(path: Path) -> tuple[int, int] | None:
+    """Return a cheap source-image version marker without reading its contents."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size
+
 _DESTRUCTIVE_SHELL_PREFIXES = (
     "rm ", "cp ", "mv ", "dd ", "mkfs", "chmod ", "chown ", "kill ", "pkill ",
     "shutdown", "reboot", "halt ", "poweroff", "init ", "systemctl stop",
@@ -298,6 +309,7 @@ _TOOL_NAME_REPLACEMENTS = {
     "ensure_runtime_tools": "配置运行时命令行工具",
     "check_vision_model_config": "检查视觉模型配置",
     "analyze_image": "分析图片",
+    "prepare_image_for_vision": "压缩图片以供视觉模型分析",
     "configure_vision_model": "配置视觉模型",
     "search_literature": "检索学术文献",
     "search_web": "搜索互联网",
@@ -488,6 +500,7 @@ _TOOL_PROGRESS_MESSAGES = {
         "检查视觉模型配置失败",
     ),
     "analyze_image": ("正在调用视觉模型分析图片", "图片分析完成", "图片分析失败"),
+    "prepare_image_for_vision": ("正在压缩图片", "图片压缩完成", "图片压缩失败"),
     "configure_vision_model": ("正在配置视觉模型", "视觉模型配置完成", "视觉模型配置失败"),
     "search_literature": ("正在检索学术文献", "学术文献检索完成", "学术文献检索失败"),
     "search_web": ("正在搜索互联网", "互联网搜索完成", "互联网搜索失败"),
@@ -996,6 +1009,8 @@ class AgentLoop:
         self._ref_urls: list[str] = []
         self._direct_response: str | None = None
         self._current_user_message = ""
+        self._vision_analyses_this_turn = 0
+        self._successful_vision_images: dict[str, tuple[int, int] | None] = {}
         self.tracker = TokenTracker()
 
     def reset_system_prompt(self, language: str) -> None:
@@ -1053,6 +1068,7 @@ class AgentLoop:
         self._ref_urls.clear()
         self._direct_response = None
         self._current_user_message = user_message
+        self._reset_turn_vision_guard()
         self._drop_incomplete_tool_call_tail()
         self.messages = _sanitize_tool_message_sequence(self.messages)
         self._refresh_system_prompt_for_turn(user_message)
@@ -1100,6 +1116,7 @@ class AgentLoop:
         self._ref_urls.clear()
         self._direct_response = None
         self._current_user_message = user_message
+        self._reset_turn_vision_guard()
         self._drop_incomplete_tool_call_tail()
         self.messages = _sanitize_tool_message_sequence(self.messages)
         self._refresh_system_prompt_for_turn(user_message)
@@ -1185,6 +1202,44 @@ class AgentLoop:
     def _drop_incomplete_tool_call_tail(self) -> None:
         if self.messages and self.messages[-1].role == "assistant" and self.messages[-1].tool_calls:
             self.messages.pop()
+
+    def _reset_turn_vision_guard(self) -> None:
+        self._vision_analyses_this_turn = 0
+        self._successful_vision_images.clear()
+
+    def _vision_analysis_block_reason(self, arguments: dict) -> str | None:
+        """Prevent costly visual-analysis loops within one user request."""
+        raw_paths = arguments.get("image_paths", [])
+        paths = raw_paths if isinstance(raw_paths, list) else []
+        fingerprints = {
+            str(Path(path).resolve()): _image_fingerprint(Path(path))
+            for path in paths
+            if isinstance(path, str)
+        }
+        if fingerprints and all(
+            self._successful_vision_images.get(path) == fingerprint
+            for path, fingerprint in fingerprints.items()
+        ):
+            return (
+                "本轮已成功分析过这张未发生变化的图片。不要再次调用视觉模型，也不要继续执行脚本；"
+                "请依据已有分析直接给用户结论。"
+            )
+        if self._vision_analyses_this_turn >= _MAX_VISION_ANALYSES_PER_TURN:
+            return (
+                f"本轮图片分析已达到 {_MAX_VISION_ANALYSES_PER_TURN} 次上限。"
+                "不要再调用视觉模型或继续迭代脚本；请基于已有结果直接给用户结论。"
+            )
+        self._vision_analyses_this_turn += 1
+        return None
+
+    def _record_successful_vision_images(self, arguments: dict) -> None:
+        raw_paths = arguments.get("image_paths", [])
+        if not isinstance(raw_paths, list):
+            return
+        for path in raw_paths:
+            if isinstance(path, str):
+                resolved = str(Path(path).resolve())
+                self._successful_vision_images[resolved] = _image_fingerprint(Path(path))
 
     async def _handle_tool_calls(
         self, tool_calls: list[ToolCall], text: str
@@ -1481,6 +1536,22 @@ class AgentLoop:
     ) -> AsyncGenerator[StreamEvent, None]:
         spec = self.registry.get(tc.name)
         parsed_args = self._parse_tool_args(tc)
+        if tc.name == "analyze_image":
+            blocked_reason = self._vision_analysis_block_reason(parsed_args)
+            if blocked_reason:
+                debug_log("agent.vision_analysis_blocked", reason=blocked_reason)
+                yield StreamEvent(type="status", content=blocked_reason)
+                self.messages.append(
+                    Message(
+                        role="tool",
+                        content=json.dumps(
+                            {"status": "blocked", "message": blocked_reason},
+                            ensure_ascii=False,
+                        ),
+                        tool_call_id=tc.id,
+                    )
+                )
+                return
         debug_log(
             "agent.tool_started",
             tool_name=tc.name,
@@ -1534,6 +1605,8 @@ class AgentLoop:
                 content=_tool_progress_message(tc.name, "done", parsed_args),
             )
             result_str = json.dumps(exec_result.result, ensure_ascii=False, default=str)
+            if tc.name == "analyze_image":
+                self._record_successful_vision_images(parsed_args)
             self._apply_runtime_config_update(tc.name, exec_result.result)
             direct_response = _direct_tool_response(tc.name, exec_result.result)
             if direct_response:
@@ -1546,7 +1619,23 @@ class AgentLoop:
             result_str = json.dumps(exec_result.result, ensure_ascii=False, default=str)
             error_message = ""
             if isinstance(exec_result.result, dict):
-                error_message = str(exec_result.result.get("message") or exec_result.result.get("error") or "")
+                error_message = str(
+                    exec_result.result.get("message")
+                    or exec_result.result.get("error")
+                    or ""
+                )
+                if exec_result.result.get("setup_required"):
+                    credential_request = exec_result.result.get("credential_request", {})
+                    yield StreamEvent(
+                        type="status",
+                        content=json.dumps(
+                            {
+                                "setup_required": exec_result.result["setup_required"],
+                                "credential_request": credential_request,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
             if error_message.startswith(_tool_progress_message(tc.name, "error", parsed_args)):
                 content = _sanitize_progress_text(error_message)
             else:

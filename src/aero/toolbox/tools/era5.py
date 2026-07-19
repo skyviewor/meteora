@@ -12,6 +12,7 @@ from aero.toolbox.config_access import find_config
 from aero.toolbox.download_progress import download_progress_reporter
 from aero.toolbox.paths import find_project_dir, short_path
 from aero.toolbox.registry import register_tool
+from aero.toolbox.secret_input import credential_request_for
 
 logger = structlog.get_logger()
 
@@ -157,10 +158,12 @@ async def download_era5(
     if not cds_cfg.key:
         return {
             "status": "error",
+            "setup_required": "cds",
+            "credential_request": credential_request_for("cds"),
             "message": (
                 "CDS API key 未配置。请在 https://cds.climate.copernicus.eu/ 注册账户，"
-                "进入 User Profile → API key，然后将 key 粘贴到 Aero 对话框。\n"
-                "可以直接粘贴官方显示的两行配置：url: ... 和 key: ..."
+                "进入 User Profile → API key。Aero 将打开本地安全输入框，"
+                "请在那里粘贴官方显示的两行配置：url: ... 和 key: ..."
             ),
         }
 
@@ -585,5 +588,3 @@ def _summarize_dataset(ds, variables: list[str]) -> dict:
                 "dtype": str(da.dtype),
             }
     return info
-
-

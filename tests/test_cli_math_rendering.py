@@ -197,10 +197,26 @@ def test_usage_meta_text_formats_cache_hit_as_status_segment():
 
     assert "[dim]上下文[/dim] 43.3K [dim]/ 4%[/dim]" in text
     assert "[dim]命中缓存[/dim] 95%" in text
+    assert "[dim]会话累计[/dim] ¥" in text
     assert "¥" in text
     assert "[dim]cost[/dim]" not in text
     assert "♻" not in text
     assert "(4%)" not in text
+
+
+def test_qwen37_plus_pricing_applies_bailian_cache_discount():
+    tracker = TokenTracker()
+    tracker.add_llm(
+        {
+            "prompt_tokens": 1_000_000,
+            "completion_tokens": 1_000_000,
+            "prompt_tokens_details": {"cached_tokens": 800_000},
+        },
+        "qwen3.7-plus",
+    )
+
+    # Standard China-mainland price: input ¥2/M, cached input 20%, output ¥8/M.
+    assert tracker.total_cost() == 8.72
 
 
 def test_session_option_label_uses_iso_time_without_usage():

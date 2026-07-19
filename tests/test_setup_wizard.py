@@ -6,7 +6,11 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.widgets import Input, OptionList, Static
 
-from aero.cli.main import AeroApp, SelectScreen, _model_options
+from aero.cli.main import (
+    AeroApp,
+    SelectScreen,
+    _model_options,
+)
 from aero.cli.setup_wizard import FirstRunSetupScreen
 from aero.core.config import AeroConfig, LLMProviderConfig
 from aero.core.llm_providers import BUILTIN_LLM_PROVIDERS, model_tags
@@ -65,7 +69,94 @@ async def test_wizard_offers_primary_reuse_for_known_multimodal_model():
 
 
 @pytest.mark.asyncio
-async def test_preset_provider_has_three_labelled_connection_fields():
+async def test_web_search_hides_duplicate_bailian_setup_when_key_can_be_reused():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._vision = {
+            "mode": "separate",
+            "provider": "bailian",
+            "api_key": "sk-bailian",
+        }
+        wizard._page = "web_search_setup"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+        assert option_ids == ["skip", "reuse_bailian", "configure_zhipu"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_keeps_bailian_setup_without_reusable_key():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._vision = {"mode": "separate", "provider": "bailian", "api_key": ""}
+        wizard._page = "web_search_setup"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+        assert option_ids == ["skip", "configure_bailian", "configure_zhipu"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_hides_duplicate_zhipu_setup_when_key_can_be_reused():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._vision = {
+            "mode": "separate",
+            "provider": "zhipu",
+            "api_key": "sk-zhipu",
+        }
+        wizard._page = "web_search_setup"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+        assert option_ids == ["skip", "configure_bailian", "reuse_zhipu"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_defaults_to_reusing_primary_bailian_key():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {"provider": "bailian", "api_key": "sk-bailian-primary"}
+        wizard._page = "web_search_setup"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+        assert option_ids == ["reuse_bailian", "skip", "configure_zhipu"]
+        assert options.highlighted == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["bailian", "zhipu"])
+async def test_web_search_form_only_shows_api_key(provider):
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._web_search = {"configured": True, "provider": provider}
+        wizard._page = "web_search_form"
+        wizard._render_page()
+        assert wizard.query_one("#setup-url", Input).display is False
+        assert wizard.query_one("#setup-model", Input).display is False
+        assert wizard.query_one("#setup-key", Input).display is True
+        assert wizard.focused is not None
+        assert wizard.focused.id == "setup-key"
+
+
+@pytest.mark.asyncio
+async def test_preset_provider_only_shows_api_key_and_key_acquisition_help():
     app = WizardHost()
 
     async with app.run_test(size=(100, 30)) as pilot:
@@ -76,12 +167,35 @@ async def test_preset_provider_has_three_labelled_connection_fields():
         wizard._render_page()
         assert wizard.query_one("#setup-url").value == "https://api.deepseek.com"
         assert wizard.query_one("#setup-model").value == "deepseek-v4-flash"
+        assert wizard.query_one("#setup-url", Input).display is False
+        assert wizard.query_one("#setup-model", Input).display is False
         assert wizard.query_one("#setup-key").placeholder == "API Key"
+        help_text = wizard.query_one("#setup-provider-help", Static)
+        assert help_text.display is True
+        assert "platform.deepseek.com/api_keys" in str(help_text.render())
         assert wizard.focused is not None
-        assert wizard.focused.id == "setup-url"
-        await pilot.press("down")
-        assert wizard.focused is not None
-        assert wizard.focused.id == "setup-model"
+        assert wizard.focused.id == "setup-key"
+
+
+def test_preset_provider_key_urls_open_the_key_management_pages():
+    assert BUILTIN_LLM_PROVIDERS["deepseek"].api_key_url == "https://platform.deepseek.com/api_keys"
+    assert BUILTIN_LLM_PROVIDERS["bailian"].api_key_url.endswith("#/efm/api_key")
+    assert BUILTIN_LLM_PROVIDERS["kimi"].api_key_url == "https://platform.kimi.com/console/api-keys"
+
+
+@pytest.mark.asyncio
+async def test_custom_provider_keeps_endpoint_and_model_fields_editable():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {"provider": "custom"}
+        wizard._page = "primary_form"
+        wizard._render_page()
+        assert wizard.query_one("#setup-url", Input).display is True
+        assert wizard.query_one("#setup-model", Input).display is True
+        assert wizard.query_one("#setup-provider-help", Static).display is False
 
 
 @pytest.mark.asyncio

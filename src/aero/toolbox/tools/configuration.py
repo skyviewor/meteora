@@ -23,6 +23,63 @@ from aero.core.llm_providers import (
 )
 from aero.toolbox.config_access import find_config, find_config_path, mask_secret
 from aero.toolbox.registry import register_tool
+from aero.toolbox.secret_input import (
+    CredentialSpec,
+    SecretInputRequest,
+    register_credential_spec,
+    request_secret_input_from_context,
+    save_secret_from_context,
+    take_secret_from_context,
+)
+
+
+@register_tool(
+    name="request_secret_input",
+    description=(
+        "打开本地安全凭据输入窗口。密钥原文不会发送给模型；成功后只返回一次性 "
+        "secret_handle。拿到 handle 后，调用对应配置工具并传 credential_handle 保存。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string", "description": "凭据用途，例如 cds、ads 或 web_search。"},
+            "title": {"type": "string", "description": "输入窗口标题。"},
+            "instructions": {"type": "string", "description": "展示给用户的格式说明。"},
+            "multiline": {"type": "boolean", "description": "是否需要多行输入。"},
+        },
+        "required": ["scope", "title", "instructions"],
+    },
+)
+async def request_secret_input(
+    scope: str, title: str, instructions: str, multiline: bool = False
+) -> dict:
+    """Request a secret through the client UI and return only a handle."""
+    return await request_secret_input_from_context(
+        SecretInputRequest(scope, title, instructions, multiline)
+    )
+
+
+@register_tool(
+    name="save_secret_handle",
+    description=(
+        "用一次性 credential_handle 在本地保存已注册用途的凭据。"
+        "密钥原文不会进入模型上下文。先调用 request_secret_input，再调用本工具。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string", "description": "凭据用途。"},
+            "credential_handle": {
+                "type": "string",
+                "description": "request_secret_input 返回的一次性句柄。",
+            },
+        },
+        "required": ["scope", "credential_handle"],
+    },
+)
+def save_secret_handle(scope: str, credential_handle: str) -> dict:
+    """Dispatch a one-time secret handle to the scope's local consumer."""
+    return save_secret_from_context(scope, credential_handle)
 
 
 @register_tool(
@@ -58,8 +115,8 @@ def check_cds_config() -> dict:
             "CDS API 未配置。请引导用户完成以下步骤：\n"
             "1. 访问 https://cds.climate.copernicus.eu/ 注册账户\n"
             "2. 进入 User Profile → API key\n"
-            "3. 直接原样粘贴页面上的两行官方配置：url: ... 和 key: ...\n"
-            "收到用户粘贴的凭证后，立即保存配置。"
+            "3. 使用本地安全凭据输入框粘贴页面上的两行官方配置：url: ... 和 key: ...\n"
+            "凭据不会发送给模型。"
         ),
     }
 
@@ -68,28 +125,44 @@ def check_cds_config() -> dict:
     name="configure_cds_key",
     description=(
         "保存 CDS API 的 URL 和 Key 到用户级密钥文件。"
-        "当用户粘贴 CDS 官方两行凭证（url: ...\\nkey: ...）时调用此工具；也兼容旧的单行凭证。"
+        "新流程接收 request_secret_input 返回的 credential_handle；也兼容旧的原始凭据文本。"
         "成功后用户即可下载数据。"
     ),
     parameters={
         "type": "object",
         "properties": {
+            "credential_handle": {
+                "type": "string",
+                "description": "由 request_secret_input 返回的一次性安全凭据句柄。",
+            },
             "credential_string": {
                 "type": "string",
-                "description": "用户粘贴的凭证字符串，通常是官方两行格式：url: ...\\nkey: ...",
+                "description": "兼容旧调用；新流程不要传入原始密钥。",
             },
         },
-        "required": ["credential_string"],
     },
 )
-def configure_cds_key(credential_string: str) -> dict:
+def configure_cds_key(
+    credential_string: str = "", credential_handle: str = ""
+) -> dict:
     """Parse CDS credential string and save to the user secrets file.
 
     Supports formats:
     - "https://cds.climate.copernicus.eu/api:xxxx-xxxx-xxxx-xxxx"
     - "url: https://cds.climate.copernicus.eu/api\nkey: xxxx-xxxx-xxxx-xxxx"
     """
-    text = credential_string.strip()
+    text = take_secret_from_context(credential_handle) if credential_handle else credential_string
+    return _save_cds_credential(text)
+
+
+def _save_cds_credential(text: str | None) -> dict:
+    """Parse and save raw CDS input; called only within a local credential consumer."""
+    if not text:
+        return {
+            "status": "error",
+            "message": "未收到有效的安全凭据句柄，请先调用 request_secret_input。",
+        }
+    text = text.strip()
 
     if "\n" in text:
         parts = text.split("\n")
@@ -136,6 +209,21 @@ def configure_cds_key(credential_string: str) -> dict:
         "message": "CDS API key 已保存到用户级密钥文件，现在可以开始下载数据。",
         "secrets_path": str(user_secrets_path()),
     }
+
+
+register_credential_spec(
+    CredentialSpec(
+        scope="cds",
+        title="输入 CDS API 凭证",
+        instructions=(
+            "请粘贴 CDS 官方页面上的两行配置：\n"
+            "url: https://cds.climate.copernicus.eu/api\n"
+            "key: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        ),
+        multiline=True,
+        consumer=_save_cds_credential,
+    )
+)
 
 
 @register_tool(
@@ -186,16 +274,25 @@ def check_ads_config() -> dict:
             "credential_string": {
                 "type": "string",
                 "description": (
-                    "用户粘贴的 ADS 凭证；可为官方两行 url/key，也可为单独 token。"
+                    "兼容旧调用；新流程不要传入原始密钥。"
                 ),
             },
+            "credential_handle": {
+                "type": "string",
+                "description": "由 request_secret_input 返回的一次性安全凭据句柄。",
+            },
         },
-        "required": ["credential_string"],
     },
 )
-def configure_ads_key(credential_string: str) -> dict:
+def configure_ads_key(credential_string: str = "", credential_handle: str = "") -> dict:
     """Parse and save ADS API credentials."""
-    ads_url, ads_key = _parse_ads_credentials(credential_string)
+    text = take_secret_from_context(credential_handle) if credential_handle else credential_string
+    return _save_ads_credential(text)
+
+
+def _save_ads_credential(credential_string: str | None) -> dict:
+    """Parse and save raw ADS input; called only within a local credential consumer."""
+    ads_url, ads_key = _parse_ads_credentials(credential_string or "")
     if not ads_key:
         return {
             "status": "error",
@@ -255,6 +352,20 @@ def _parse_ads_credentials(credential_string: str) -> tuple[str, str]:
     return url, text
 
 
+register_credential_spec(
+    CredentialSpec(
+        scope="ads",
+        title="输入 ADS API 凭证",
+        instructions=(
+            "请粘贴 ADS 官方页面显示的 url/key 配置，或单独粘贴 Personal Access Token。\n"
+            "内容只会在本地解析和保存，不会发送给模型。"
+        ),
+        multiline=True,
+        consumer=_save_ads_credential,
+    )
+)
+
+
 @register_tool(
     name="check_earthdata_config",
     description=(
@@ -286,7 +397,7 @@ def check_earthdata_config() -> dict:
             "2. 登录后点击页面右上角 My Profile\n"
             "3. 在 My Profile 页面找到 Access Token 区域\n"
             "4. 点击 Generate Token 生成 token；如果已经有 token，可以直接复制现有 token\n"
-            "5. 将 token 字符串直接粘贴给我，我会保存到本地用户级密钥文件\n\n"
+            "5. 使用 Aero 的本地安全凭据输入窗口粘贴 token；它不会发送给模型\n\n"
             "也可以自行设置环境变量 EARTHDATA_TOKEN。"
         ),
     }
@@ -304,15 +415,24 @@ def check_earthdata_config() -> dict:
         "properties": {
             "token": {
                 "type": "string",
-                "description": "用户粘贴的 NASA Earthdata token。",
+                "description": "兼容旧调用；新流程不要传入原始 token。",
+            },
+            "credential_handle": {
+                "type": "string",
+                "description": "由 request_secret_input 返回的一次性安全凭据句柄。",
             },
         },
-        "required": ["token"],
     },
 )
-def configure_earthdata_token(token: str) -> dict:
+def configure_earthdata_token(token: str = "", credential_handle: str = "") -> dict:
     """Save a NASA Earthdata token in the user secrets file."""
-    value = _normalize_secret_token(token)
+    text = take_secret_from_context(credential_handle) if credential_handle else token
+    return _save_earthdata_token(text)
+
+
+def _save_earthdata_token(text: str | None) -> dict:
+    """Normalize and save Earthdata input locally."""
+    value = _normalize_secret_token(text or "")
     if not value:
         return {"status": "error", "message": "Earthdata token 不能为空。"}
 
@@ -352,6 +472,20 @@ def _normalize_secret_token(text: str) -> str:
     if value.lower().startswith("bearer "):
         value = value.split(None, 1)[1].strip()
     return value
+
+
+register_credential_spec(
+    CredentialSpec(
+        scope="earthdata",
+        title="输入 NASA Earthdata Token",
+        instructions=(
+            "请粘贴 NASA Earthdata 的 Access Token（可带 `Bearer ` 前缀）。\n"
+            "它仅在本地保存，用于 MERRA-2/GES DISC 下载，不会发送给模型。"
+        ),
+        multiline=False,
+        consumer=_save_earthdata_token,
+    )
+)
 
 
 @register_tool(

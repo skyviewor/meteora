@@ -12,6 +12,8 @@ _DEPRECATED_LLM_MODELS = {
     ("deepseek", "deepseek-reasoner"): "deepseek-v4-pro",
 }
 
+_REMOVED_LLM_PROVIDERS = {"minimax", "zhipu"}
+
 
 class CDSCredentials(BaseModel):
     url: str = "https://cds.climate.copernicus.eu/api"
@@ -66,6 +68,7 @@ class LLMConfig(BaseModel):
             provider_config.model = self.model
         if self.base_url:
             provider_config.base_url = self.base_url
+        self.refresh_capabilities()
 
     def use_provider_settings(self) -> None:
         provider_config = self.providers.get(self.provider)
@@ -75,6 +78,13 @@ class LLMConfig(BaseModel):
             self.model = provider_config.model
         if provider_config.base_url:
             self.base_url = provider_config.base_url
+        self.refresh_capabilities()
+
+    def refresh_capabilities(self) -> None:
+        """Derive model capabilities from the active provider profile."""
+        from aero.core.llm_providers import model_supports_vision
+
+        self.supports_vision = model_supports_vision(self.provider, self.model)
 
     @property
     def api_key(self) -> str:
@@ -95,6 +105,17 @@ class LLMConfig(BaseModel):
         for provider, profile in self.providers.items():
             profile_key = (provider.strip().lower(), profile.model.strip().lower())
             profile.model = _DEPRECATED_LLM_MODELS.get(profile_key, profile.model)
+
+    def migrate_removed_provider(self) -> bool:
+        """Move an active profile for a removed provider to the default setup."""
+        if self.provider.strip().lower() not in _REMOVED_LLM_PROVIDERS:
+            return False
+        self.provider = "deepseek"
+        self.model = "deepseek-v4-flash"
+        self.base_url = ""
+        self.reasoning_effort = ""
+        self.supports_vision = False
+        return True
 
 
 class VisionConfig(BaseModel):
@@ -271,11 +292,30 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
         config.web_search.api_key = str(vision.get("api_key") or config.web_search.api_key)
         config.web_search.base_url = str(vision.get("base_url") or config.web_search.base_url)
 
+    # Zhipu remains available for web search but no longer for the primary LLM.
+    # Preserve an existing primary-model credential as the search credential so
+    # an upgrade does not silently disable the user's already configured search.
+    if (
+        config.llm.provider.strip().lower() == "zhipu"
+        and config.llm.active_api_key()
+        and not config.web_search.api_key
+    ):
+        config.web_search.provider = "zhipu"
+        config.web_search.model = "search_std"
+        config.web_search.base_url = "https://open.bigmodel.cn/api/paas/v4/web_search"
+        config.web_search.api_key = config.llm.active_api_key()
+
     email = secrets.get("email")
     if isinstance(email, dict) and email.get("smtp_password"):
         config.email.smtp_password = str(email["smtp_password"])
 
     config.llm.migrate_deprecated_models()
+    config.llm.refresh_capabilities()
+    removed_primary_provider = config.llm.migrate_removed_provider()
+    if removed_primary_provider and config.vision.mode == "reuse_primary":
+        config.vision = VisionConfig(cache_ttl_hours=config.vision.cache_ttl_hours)
+    elif config.vision.provider.strip().lower() in _REMOVED_LLM_PROVIDERS:
+        config.vision = VisionConfig(cache_ttl_hours=config.vision.cache_ttl_hours)
     return config
 
 
@@ -372,7 +412,7 @@ def save_web_search_api_key(
 
 def vision_is_configured(config: AeroConfig) -> bool:
     if config.vision.mode == "separate":
-        return bool(config.vision.model and config.vision.api_key)
+        return bool(config.vision.model and _separate_vision_api_key(config))
     if config.vision.mode == "reuse_primary":
         return bool(config.llm.supports_vision and config.llm.model and config.llm.active_api_key())
     return False
@@ -389,8 +429,30 @@ def resolved_vision_config(config: AeroConfig) -> VisionConfig | None:
             cache_ttl_hours=config.vision.cache_ttl_hours,
         )
     if config.vision.mode == "separate" and vision_is_configured(config):
-        return config.vision
+        return VisionConfig(
+            mode="separate",
+            provider=config.vision.provider,
+            model=config.vision.model,
+            api_key=_separate_vision_api_key(config),
+            base_url=_separate_vision_base_url(config),
+            cache_ttl_hours=config.vision.cache_ttl_hours,
+        )
     return None
+
+
+def _separate_vision_api_key(config: AeroConfig) -> str:
+    """Resolve a dedicated key, then reuse a matching saved provider key."""
+    if config.vision.api_key:
+        return config.vision.api_key
+    profile = config.llm.providers.get(config.vision.provider.strip())
+    return profile.api_key if profile else ""
+
+
+def _separate_vision_base_url(config: AeroConfig) -> str:
+    if config.vision.base_url:
+        return config.vision.base_url
+    profile = config.llm.providers.get(config.vision.provider.strip())
+    return profile.base_url if profile else ""
 
 
 def save_email_smtp_password(smtp_password: str) -> None:

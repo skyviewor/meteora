@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -37,9 +38,11 @@ from textual.widgets import (
     ListItem,
     ListView,
     Markdown,
+    Input,
     OptionList,
     Static,
     TextArea,
+    Button,
 )
 from textual.widgets._markdown import MarkdownBullet, MarkdownBulletList, MarkdownListItem
 from textual.widgets._option_list import Option
@@ -79,9 +82,12 @@ from aero.agent.checkpoint_context import use_checkpoint_creator
 from aero.core.config import (
     AeroConfig,
     clear_llm_api_key,
+    resolved_vision_config,
+    save_cds_credentials,
     save_llm_profile,
     save_vision_api_key,
     save_web_search_api_key,
+    vision_is_configured,
 )
 from aero.core.debug_log import configure_debug_logging, debug_log
 from aero.core.llm_providers import (
@@ -98,6 +104,11 @@ from aero.i18n import is_supported_language, language_label, language_options, t
 from aero.paper_versions import PaperVersionManager
 from aero.paper_export import PaperExportError, export_paper
 from aero.toolbox.paths import use_workspace
+from aero.toolbox.secret_input import (
+    SecretInputRequest,
+    get_credential_spec,
+    use_secret_input_provider,
+)
 
 DEEPSEEK_MODEL_ALIASES = {
     "flash": "deepseek-v4-flash",
@@ -106,6 +117,7 @@ DEEPSEEK_MODEL_ALIASES = {
     "v4-pro": "deepseek-v4-pro",
 }
 REASONING_EFFORTS = {"low", "medium", "high", "max", "xhigh"}
+_REUSE_PRIMARY_VISION_OPTION = "__reuse_primary_vision__"
 DEEPSEEK_API_KEYS_URL = "https://platform.deepseek.com/api_keys"
 DEEPSEEK_DOCS_URL = "https://api-docs.deepseek.com/"
 
@@ -537,6 +549,156 @@ class ConfirmScreen(ModalScreen[str]):
 
     def action_deny(self) -> None:
         self.dismiss("deny")
+
+
+class SecretInputAction(Static):
+    """Focusable text action used by the keyboard-first secret dialog."""
+
+    can_focus = True
+
+
+class SecretInputScreen(ModalScreen[str | None]):
+    """Local-only entry surface for a secret requested by a tool."""
+
+    CSS = """
+    SecretInputScreen { align: center middle; }
+    #secret-input-dialog {
+        width: 78%; max-width: 96; height: auto; max-height: 28;
+        background: $surface; padding: 1 2;
+    }
+    #secret-input-title { text-style: bold; }
+    #secret-input-note { color: $text-muted; margin: 1 0; }
+    #secret-input-value { height: 8; border: solid $primary; }
+    #secret-input-actions {
+        width: 100%; height: 3; margin-top: 1;
+        background: transparent; padding: 0; align: left middle;
+    }
+    .secret-input-action {
+        width: auto; min-width: 8; padding: 0 1; margin: 0 1 0 0;
+        background: transparent; color: $text-muted; content-align: center middle;
+    }
+    .secret-input-action.secret-input-selected {
+        background: transparent; color: #5dade2; text-style: bold;
+    }
+    #secret-input-hint { color: $text-muted; margin-top: 1; }
+    """
+
+    BINDINGS = [
+        Binding("tab", "focus_actions", show=False, priority=True),
+        Binding("shift+tab", "focus_actions_previous", show=False, priority=True),
+        Binding("escape", "cancel", "取消", show=False, priority=True),
+    ]
+    _ACTION_IDS = ("#secret-input-submit", "#secret-input-cancel")
+
+    def __init__(self, request: SecretInputRequest):
+        super().__init__()
+        self._request = request
+        self._action_focused = False
+        self._selected_action = 0
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="secret-input-dialog"):
+            yield Static(self._request.title, id="secret-input-title")
+            yield Static(self._request.instructions, id="secret-input-note")
+            if self._request.multiline:
+                yield TextArea(id="secret-input-value", show_line_numbers=False)
+            else:
+                yield Input(password=True, id="secret-input-value")
+            with Horizontal(id="secret-input-actions"):
+                yield SecretInputAction(
+                    "确认保存", id="secret-input-submit", classes="secret-input-action"
+                )
+                yield SecretInputAction(
+                    "取消", id="secret-input-cancel", classes="secret-input-action"
+                )
+            yield Static(
+                "Tab 切换到操作 · ←→ 选择 · Enter 确认 · Esc 取消",
+                id="secret-input-hint",
+            )
+
+    def on_mount(self) -> None:
+        self.query_one("#secret-input-value").focus()
+        self._sync_selected_action()
+
+    def on_key(self, event: events.Key) -> None:
+        if self._action_focused:
+            if event.key in {"left", "right", "tab", "shift+tab"}:
+                event.stop()
+                event.prevent_default()
+                self._move_action_focus(-1 if event.key in {"left", "shift+tab"} else 1)
+            elif event.key == "up":
+                event.stop()
+                event.prevent_default()
+                self._leave_actions()
+            elif event.key in {"enter", "space"}:
+                event.stop()
+                event.prevent_default()
+                self._activate_selected_action()
+            return
+
+        if event.key == "tab":
+            event.stop()
+            event.prevent_default()
+            self._focus_actions()
+        elif event.key == "enter" and not self._request.multiline:
+            event.stop()
+            event.prevent_default()
+            self.action_submit()
+
+    def action_submit(self) -> None:
+        widget = self.query_one("#secret-input-value")
+        value = widget.text if isinstance(widget, TextArea) else widget.value
+        self.dismiss(value.strip() or None)
+
+    def action_focus_actions(self) -> None:
+        self._focus_actions()
+
+    def action_focus_actions_previous(self) -> None:
+        self._focus_actions(last=True)
+
+    @on(events.Click, "#secret-input-submit")
+    def on_submit_pressed(self) -> None:
+        self._selected_action = 0
+        self.action_submit()
+
+    @on(events.Click, "#secret-input-cancel")
+    def on_cancel_pressed(self) -> None:
+        self._selected_action = 1
+        self.action_cancel()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def _focus_actions(self, *, last: bool = False) -> None:
+        self._action_focused = True
+        self._selected_action = len(self._ACTION_IDS) - 1 if last else 0
+        self._sync_selected_action()
+        self.query_one(self._ACTION_IDS[self._selected_action], SecretInputAction).focus()
+
+    def _leave_actions(self) -> None:
+        self._action_focused = False
+        self._sync_selected_action()
+        self.query_one("#secret-input-value").focus()
+
+    def _move_action_focus(self, delta: int) -> None:
+        self._selected_action = (self._selected_action + delta) % len(self._ACTION_IDS)
+        self._sync_selected_action()
+        self.query_one(self._ACTION_IDS[self._selected_action], SecretInputAction).focus()
+
+    def _sync_selected_action(self) -> None:
+        for index, selector in enumerate(self._ACTION_IDS):
+            action = self.query_one(selector, Static)
+            action.set_class(
+                self._action_focused and index == self._selected_action,
+                "secret-input-selected",
+            )
+            action.refresh(repaint=True)
+
+    def _activate_selected_action(self) -> None:
+        if self._selected_action == 0:
+            self.action_submit()
+        else:
+            self.action_cancel()
 
 
 class HelpScreen(ModalScreen[None]):
@@ -1453,6 +1615,8 @@ class AeroApp(App):
         self._last_reply_text: str = ""
         self._chat_log: list[str] = []
         self._pending_llm_setup: dict | None = None
+        self._pending_credential_scope: str | None = None
+        self._secret_handles: dict[str, str] = {}
         self._filtered_commands: list[tuple[str, str]] = []
         self._cmd_list: ListView | None = None
         self._model_info: Static | None = None
@@ -1884,10 +2048,11 @@ class AeroApp(App):
                 effort=self.config.llm.reasoning_effort or "auto",
             )
         )
-        if _vision_configured(self.config):
+        vision_config = resolved_vision_config(self.config)
+        if vision_config is not None:
             text += t("app.vision_line", lang).format(
-                model=_display_vision_model_name(self.config.vision.model),
-                provider=_display_vision_provider_name(self.config.vision.provider),
+                model=_display_vision_model_name(vision_config.model),
+                provider=_display_vision_provider_name(vision_config.provider),
             )
         return f"[dim]{text}[/dim]" if markup else text
 
@@ -1899,9 +2064,10 @@ class AeroApp(App):
             f"{escape(model_name)} [dim]{escape(provider)} ·[/dim] "
             f"[bold warning]{escape(effort)}[/bold warning]"
         )
-        if _vision_configured(self.config):
-            vision_model = _display_vision_model_name(self.config.vision.model)
-            vision_provider = _display_vision_provider_name(self.config.vision.provider)
+        vision_config = resolved_vision_config(self.config)
+        if vision_config is not None:
+            vision_model = _display_vision_model_name(vision_config.model)
+            vision_provider = _display_vision_provider_name(vision_config.provider)
             text += (
                 f" [dim]&[/dim] {escape(vision_model)} "
                 f"[dim]{escape(vision_provider)}[/dim]"
@@ -2341,14 +2507,26 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
+        if self._pending_credential_scope is not None:
+            if await self._handle_pending_credential(text):
+                self.query_one("#user-input", TextArea).focus()
+                return
+
+        cds_credentials = _extract_cds_credentials(text)
+        if cds_credentials is not None:
+            cds_url, cds_key = cds_credentials
+            await self._handle_local_cds_credentials(text, cds_url, cds_key)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
         api_key = _extract_llm_api_key(text)
         if api_key and _mentions_vision_model(text):
             await self._handle_local_vision_key_setup(text, api_key)
             self.query_one("#user-input", TextArea).focus()
             return
 
-        if _requests_vision_key_reuse(text):
-            await self._handle_local_vision_key_reuse(text)
+        if _requests_primary_vision_reuse(text):
+            await self._handle_local_vision_reuse(text)
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -2447,6 +2625,47 @@ class AeroApp(App):
         self._chat_log.append(f"Aero:\n{message}")
         self._set_footer_status(message)
 
+    async def _handle_local_cds_credentials(
+        self, text: str, url: str, key: str
+    ) -> None:
+        """Store the official CDS two-line credential without sending it to the model."""
+        self._enter_chat_mode()
+        masked_text = _mask_cds_credentials(text)
+        await self._mount_user_message(masked_text)
+        self._chat_log.append(f"你:\n{masked_text}")
+
+        self.config.credentials.cds.url = url
+        self.config.credentials.cds.key = key
+        self._pending_credential_scope = None
+        save_cds_credentials(url, key)
+        if self.persist_config:
+            _save_config(self.config)
+
+        message = (
+            "CDS API 凭证已在本地保存，未发送给模型。"
+            "现在可以重新发送刚才的 ERA5 下载与绘图任务。"
+        )
+        agent_msg = await self._mount_agent_message()
+        await agent_msg.update(message)
+        self._chat_log.append(f"Aero:\n{message}")
+        self._set_footer_status("CDS API 凭证已保存")
+
+    async def _handle_pending_credential(self, text: str) -> bool:
+        """Route a secret by the capability that explicitly requested it."""
+        if self._pending_credential_scope != "cds":
+            return False
+        credentials = _extract_cds_credentials(text)
+        if credentials is not None:
+            await self._handle_local_cds_credentials(text, *credentials)
+            return True
+        key = _extract_llm_api_key(text)
+        if not key:
+            return False
+        await self._handle_local_cds_credentials(
+            text, self.config.credentials.cds.url, key
+        )
+        return True
+
     async def _handle_local_vision_key_setup(self, text: str, api_key: str) -> None:
         self._enter_chat_mode()
         masked_text = _mask_secret_text(text)
@@ -2454,6 +2673,7 @@ class AeroApp(App):
         self._chat_log.append(f"你:\n{masked_text}")
 
         normalized_key = _normalize_pasted_api_key(api_key)
+        self.config.vision.mode = "separate"
         self.config.vision.provider = "bailian"
         self.config.vision.api_key = normalized_key
         save_vision_api_key(normalized_key, self.config.vision.base_url)
@@ -2469,23 +2689,26 @@ class AeroApp(App):
         self._chat_log.append(f"Aero:\n{message}")
         self._set_footer_status("视觉模型凭证已更新")
 
-    async def _handle_local_vision_key_reuse(self, text: str) -> None:
+    async def _handle_local_vision_reuse(self, text: str) -> None:
+        """Enable true reuse from the active primary profile without model guessing."""
         self._enter_chat_mode()
         await self._mount_user_message(text)
         self._chat_log.append(f"你:\n{text}")
 
-        configured = bool(self.config.vision.api_key)
-        if configured:
+        if self.config.llm.supports_vision and self.config.llm.active_api_key():
+            self._reuse_primary_vision_model()
+            vision = resolved_vision_config(self.config)
+            assert vision is not None
             message = (
-                "已使用已配置的百炼 API Key。无需再次提供密钥，"
-                "也不会切换主聊天模型。联网搜索是否可用还取决于百炼账户"
-                "是否已启用 WebSearch MCP 服务。"
+                "视觉能力已设置为复用当前主模型："
+                f"{_display_vision_provider_name(vision.provider)}/"
+                f"{_display_vision_model_name(vision.model)}。"
+                "图片将使用该模型分析，不会切换到百炼或其他服务商。"
             )
         else:
             message = (
-                "当前没有检测到百炼 API Key。请明确输入"
-                "“配置视觉模型 API Key：<你的 Key>”，"
-                "密钥会在本地保存并在界面中脱敏。"
+                "当前主模型不支持视觉能力，或其 API Key 尚未配置；"
+                "无法复用。请在 /vision 中选择独立视觉模型。"
             )
         agent_msg = await self._mount_agent_message()
         await agent_msg.update(message)
@@ -2997,11 +3220,21 @@ class AeroApp(App):
         parts = text.split(maxsplit=1)
         lang = self.config.language
         if len(parts) == 1:
+            options = vision_model_options()
+            current = self.config.vision.model
+            primary_vision = resolved_vision_config(self.config)
+            if self.config.vision.mode == "reuse_primary" and primary_vision is not None:
+                primary_label = (
+                    f"复用主模型：{_display_vision_model_name(primary_vision.model)}"
+                    f"（{_display_vision_provider_name(primary_vision.provider)}）"
+                )
+                options = [(_REUSE_PRIMARY_VISION_OPTION, primary_label), *options]
+                current = _REUSE_PRIMARY_VISION_OPTION
             self.push_screen(
                 SelectScreen(
                     t("app.vision_select_title", lang),
-                    vision_model_options(),
-                    self.config.vision.model,
+                    options,
+                    current,
                     lang,
                 ),
                 callback=self._apply_selected_vision_model,
@@ -3015,12 +3248,23 @@ class AeroApp(App):
         self._set_vision_model(value)
 
     def _apply_selected_vision_model(self, selected: str | None) -> None:
-        if selected is not None:
+        if selected == _REUSE_PRIMARY_VISION_OPTION:
+            self._reuse_primary_vision_model()
+        elif selected is not None:
             self._set_vision_model(selected)
         self.query_one("#user-input", TextArea).focus()
 
+    def _reuse_primary_vision_model(self) -> None:
+        self.config.vision.mode = "reuse_primary"
+        if self.persist_config:
+            _save_config(self.config)
+        self._refresh_model_info()
+        self._set_footer_status("视觉能力已切换为复用主模型")
+
     def _set_vision_model(self, model: str) -> None:
         lang = self.config.language
+        self.config.vision.mode = "separate"
+        self.config.vision.provider = "bailian"
         self.config.vision.model = model
         if self.persist_config:
             _save_config(self.config)
@@ -5254,6 +5498,7 @@ class AeroApp(App):
             content_blocked = False
             status_auto_collapsed = False
             vision_setup_requested = False
+            credential_setup_requested = False
 
             def maybe_handoff_claimed_background(status_text: str) -> bool:
                 if state.background_task is not None:
@@ -5270,6 +5515,9 @@ class AeroApp(App):
                 use_subagent_launcher(self._launch_sub_agent_from_tool),
                 use_subagent_status_provider(self._query_sub_agents_from_tool),
                 use_subagent_canceller(self._cancel_sub_agent_from_tool),
+                use_secret_input_provider(
+                    self._request_secret_input, self._take_secret_handle
+                ),
                 use_checkpoint_creator(
                     lambda name: self._create_checkpoint(name=name, kind="agent")
                 ),
@@ -5300,6 +5548,14 @@ class AeroApp(App):
                         self._maybe_scroll_to_end()
                     elif event.type == "status":
                         state.phase = "tool"
+                        credential_scope = _credential_setup_scope(event.content)
+                        if credential_scope is not None:
+                            self._pending_credential_scope = credential_scope
+                            if not credential_setup_requested:
+                                credential_setup_requested = True
+                                await self._open_required_credential_input(
+                                    credential_scope
+                                )
                         if (
                             not vision_setup_requested
                             and _vision_setup_required(event.content)
@@ -5643,6 +5899,50 @@ class AeroApp(App):
         finally:
             self.screen.remove_class("confirming")
 
+    async def _request_secret_input(self, request: SecretInputRequest) -> dict:
+        value = await self.push_screen_wait(SecretInputScreen(request))
+        if value is None:
+            return {"status": "cancelled", "scope": request.scope}
+        handle = secrets.token_urlsafe(24)
+        self._secret_handles[handle] = value
+        return {
+            "status": "submitted",
+            "scope": request.scope,
+            "secret_handle": handle,
+            "message": "已收到本地凭据；请用 secret_handle 调用对应保存工具。",
+        }
+
+    def _take_secret_handle(self, handle: str) -> str | None:
+        return self._secret_handles.pop(handle, None)
+
+    async def _open_required_credential_input(self, scope: str) -> None:
+        """Enforce local secret entry for a tool-declared missing credential."""
+        spec = get_credential_spec(scope)
+        if spec is None:
+            self._set_footer_status(f"无法为未知凭据用途打开安全输入窗口：{scope}")
+            return
+        result = await self._request_secret_input(
+            SecretInputRequest(
+                scope=spec.scope,
+                title=spec.title,
+                instructions=spec.instructions,
+                multiline=spec.multiline,
+            )
+        )
+        if result.get("status") != "submitted":
+            return
+        from aero.toolbox.tools.configuration import save_secret_handle
+
+        saved = save_secret_handle(scope, str(result["secret_handle"]))
+        if saved.get("status") != "success":
+            self._set_footer_status(str(saved.get("message") or "凭据保存失败"))
+            return
+        config_path = self._project_dir / "aero.yaml"
+        if config_path.exists():
+            self.config.credentials = AeroConfig.load(config_path).credentials
+        self._pending_credential_scope = None
+        self._set_footer_status(f"{scope.upper()} API 凭证已保存")
+
     async def _handle_confirm(self, content: str) -> None:
         tool_name = str(json.loads(content).get("tool", ""))
         choice = await self._show_confirm_dialog(content)
@@ -5873,6 +6173,15 @@ def _vision_setup_required(status_text: str) -> bool:
     return '"setup_required": "vision"' in status_text
 
 
+def _credential_setup_scope(status_text: str) -> str | None:
+    """Read a capability-declared credential request from a tool result."""
+    match = re.search(r'"setup_required"\s*:\s*"([a-z_]+)"', status_text)
+    if match is None:
+        return None
+    scope = match.group(1)
+    return scope if get_credential_spec(scope) is not None else None
+
+
 def _extract_llm_api_key(text: str) -> str:
     patterns = [
         r"(?:api\s*key|apikey|key|密钥)\s*[:：=]\s*([A-Za-z0-9][A-Za-z0-9_.-]{7,})",
@@ -5883,6 +6192,27 @@ def _extract_llm_api_key(text: str) -> str:
         if match:
             return match.group(1).strip().strip("，,。;；")
     return ""
+
+
+def _extract_cds_credentials(text: str) -> tuple[str, str] | None:
+    """Recognize the official CDS ``url``/``key`` credential format."""
+    url_match = re.search(r"(?im)^\s*url\s*[:：=]\s*(https?://\S+)\s*$", text)
+    key_match = re.search(r"(?im)^\s*key\s*[:：=]\s*([^\s]+)\s*$", text)
+    if url_match is None or key_match is None:
+        return None
+    url = url_match.group(1).rstrip("/ ")
+    key = key_match.group(1).strip().strip("，,。;；")
+    if "cds.climate.copernicus.eu" not in url.lower() or not key:
+        return None
+    return url, key
+
+
+def _mask_cds_credentials(text: str) -> str:
+    credentials = _extract_cds_credentials(text)
+    if credentials is None:
+        return _mask_secret_text(text)
+    _, key = credentials
+    return text.replace(key, _mask_secret(key))
 
 
 def _mask_secret_text(text: str) -> str:
@@ -5921,12 +6251,18 @@ def _mentions_vision_model(text: str) -> bool:
     )
 
 
-def _requests_vision_key_reuse(text: str) -> bool:
+def _requests_primary_vision_reuse(text: str) -> bool:
     lowered = text.lower()
+    reuse_requested = any(
+        marker in lowered for marker in ("复用", "共用", "使用已有", "直接用")
+    )
     return (
-        _mentions_vision_model(text)
-        and any(marker in lowered for marker in ("复用", "共用", "使用已有", "直接用"))
-        and any(marker in lowered for marker in ("api key", "apikey", "key", "密钥"))
+        reuse_requested
+        and (
+            _mentions_vision_model(text)
+            or "复用主模型" in lowered
+            or "共用主模型" in lowered
+        )
     )
 
 
@@ -6326,7 +6662,7 @@ def _display_vision_provider_name(provider: str) -> str:
 
 
 def _vision_configured(config: AeroConfig) -> bool:
-    return bool(config.vision.model and config.vision.api_key)
+    return vision_is_configured(config)
 
 
 def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
@@ -6342,7 +6678,7 @@ def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
         parts.append(f"[dim]命中缓存[/dim] {hit_ratio:.0%}")
     cost = tracker.total_cost()
     if cost > 0:
-        parts.append(escape(format_cost(cost)))
+        parts.append(f"[dim]会话累计[/dim] {escape(format_cost(cost))}")
     return " [dim]|[/dim] " + " [dim]·[/dim] ".join(parts)
 
 

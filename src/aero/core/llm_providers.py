@@ -42,7 +42,7 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
             "qwen3.5-plus",
             "qwen3.5-flash",
         ),
-        api_key_url="https://bailian.console.aliyun.com/",
+        api_key_url="https://bailian.console.aliyun.com/cn-beijing/?apiKey=1&tab=globalset#/efm/api_key",
         api_key_hint="打开阿里云百炼控制台，在 API-KEY 管理页面创建并复制 DashScope API key。",
     ),
     "kimi": LLMProviderPreset(
@@ -56,35 +56,8 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
             "kimi-k2.6",
             "kimi-k2.5",
         ),
-        api_key_url="https://platform.moonshot.cn/console/api-keys",
+        api_key_url="https://platform.kimi.com/console/api-keys",
         api_key_hint="打开 Kimi 开放平台控制台，在 API Keys 页面创建并复制 Moonshot API key。",
-    ),
-    "zhipu": LLMProviderPreset(
-        id="zhipu",
-        name="智谱 GLM",
-        base_url="https://open.bigmodel.cn/api/paas/v4",
-        default_model="glm-5",
-        models=(
-            "glm-5",
-            "glm-5.1-highspeed",
-            "glm-4.6v",
-            "glm-4.6v-flashx",
-        ),
-        api_key_url="https://open.bigmodel.cn/",
-        api_key_hint="打开智谱 AI 开放平台，在 API Keys 管理页面创建并复制 API key。",
-    ),
-    "minimax": LLMProviderPreset(
-        id="minimax",
-        name="MiniMax",
-        base_url="https://api.minimaxi.com/v1",
-        default_model="MiniMax-M3",
-        models=(
-            "MiniMax-M3",
-            "MiniMax-M2.7",
-            "MiniMax-M2.5",
-        ),
-        api_key_url="https://platform.minimax.io/",
-        api_key_hint="打开 MiniMax 开放平台，在 API Keys 页面创建并复制 API key。",
     ),
 }
 
@@ -114,13 +87,6 @@ MODEL_METADATA: dict[tuple[str, str], ModelMetadata] = {
     ("kimi", "kimi-k2.7-code"): ModelMetadata("文本 · 代码"),
     ("kimi", "kimi-k2.6"): ModelMetadata("多模态 · 均衡", supports_vision=True),
     ("kimi", "kimi-k2.5"): ModelMetadata("多模态 · 旧版", supports_vision=True),
-    ("zhipu", "glm-5"): ModelMetadata("文本 · 旗舰"),
-    ("zhipu", "glm-5.1-highspeed"): ModelMetadata("文本 · 高速"),
-    ("zhipu", "glm-4.6v"): ModelMetadata("多模态 · 高质量", supports_vision=True),
-    ("zhipu", "glm-4.6v-flashx"): ModelMetadata("多模态 · 低成本", supports_vision=True),
-    ("minimax", "minimax-m3"): ModelMetadata("多模态 · 旗舰", supports_vision=True),
-    ("minimax", "minimax-m2.7"): ModelMetadata("文本 · 高质量"),
-    ("minimax", "minimax-m2.5"): ModelMetadata("文本 · 均衡"),
 }
 
 
@@ -141,11 +107,6 @@ PROVIDER_ALIASES = {
     "月之暗面": "kimi",
     "deepseek": "deepseek",
     "深度求索": "deepseek",
-    "zhipu": "zhipu",
-    "智谱": "zhipu",
-    "glm": "zhipu",
-    "bigmodel": "zhipu",
-    "minimax": "minimax",
 }
 
 PROVIDER_MODEL_ALIASES = {
@@ -171,8 +132,13 @@ def get_provider_preset(provider: str) -> LLMProviderPreset | None:
 
 
 def provider_options() -> list[tuple[str, str]]:
+    """Build labels for provider selection only.
+
+    Model selection is a separate action, so showing a model here is
+    misleading when a saved provider profile uses a different one.
+    """
     return [
-        (preset.id, f"{preset.name}    {preset.default_model}")
+        (preset.id, preset.name)
         for preset in BUILTIN_LLM_PROVIDERS.values()
     ]
 

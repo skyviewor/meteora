@@ -39,10 +39,10 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Avoid overplotting significance dots, station names, province lines, and decorative basemaps.
 
 6. Make the output publication-safe.
-   - Design at the final intended size, not just screen size.
-   - Prefer vector output for line/cartographic figures and high-DPI raster output for image-like fields.
+   - Design at the final intended size, not just screen size. For a normal in-app result, prefer a compact, readable figure over a large source-resolution image.
+   - Prefer vector output for line/cartographic figures when the requested deliverable supports it. For default raster output, use a modest canvas and DPI; do not choose high-DPI export merely as a publication-quality default.
    - Use readable fonts, line widths, labels, colorbar ticks, and panel labels.
-   - Read `references/publication-quality.md` before final export.
+   - Read `references/publication-quality.md` before final export only when the user explicitly requests a paper, print, publication, high-resolution, or other large-format deliverable.
 
 7. Preserve reproducibility.
    - Record data source, time window, units, projection, interpolation/smoothing method, colormap, color levels, masks, and any manual annotations.
@@ -52,6 +52,12 @@ Use this skill to produce or review meteorological research figures. The goal is
 8. Save and report outputs correctly.
    - Save temporary plotting scripts under `scripts/tmp/`.
    - Save generated figures under `figures/`.
+   - Default to a delivered raster figure no larger than **500 KB** (that is, `500 * 1024` bytes). This is a hard delivery limit unless the user explicitly asks for a high-definition, print, publication, or large-format figure.
+   - Start with a compact canvas and raster DPI (normally no larger than about 7 × 5 inches and 120 DPI), tight bounding boxes, and minimal padding. Do not enlarge the canvas just to fill screen space.
+   - After every default raster export, check the actual file size. If it exceeds 500 KB, regenerate it with a smaller canvas/DPI and, if still readable, apply lossless PNG optimization or a suitable compressed format. Repeat until it is within the limit while keeping labels, colorbars, and key scientific features legible.
+   - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop pixels to meet the limit, detect and trim “white space” programmatically, save only a colorbar axis, or remove the main map/data axes. For Cartopy maps or figures built with `fig.add_axes`, do not use `bbox_inches="tight"` unless the saved result has been visually verified.
+   - Before reporting a figure, visually inspect the exported file (not only the plotting window) and verify that it includes the primary data panel, title/metadata where applicable, and colorbar/legend. If the exported dimensions or aspect ratio are implausible for the requested figure, treat it as a failed export and regenerate it rather than delivering it.
+   - Treat a user request for "高清", "高分辨率", "大图", "出版", "印刷", "publication", "print", or an explicit pixel/DPI target as the only exception to the 500 KB default. State the resulting file size when using that exception.
    - When reporting a generated image, use Markdown image syntax such as `![description](figures/name.png)`.
 
 ## Reference loading guide
@@ -76,6 +82,8 @@ These rules must be followed without exception. They override convenience, aesth
 - **Colormaps**: Never use `jet`/rainbow for continuous scalar fields. Positive fields (precip, wind speed, humidity, reflectivity) must use sequential colormaps. Anomaly/bias fields must use diverging colormaps centered at zero.
 - **Metadata**: Never omit units, valid time, variable level, or accumulation window when they matter scientifically. Colorbar must always be labeled with variable name and unit.
 - **Locked scales**: Never let each panel in a comparison auto-scale independently unless the user explicitly asks and the caption clearly says so. Same variable = same `vmin`/`vmax` across panels, times, and models.
+- **Default file-size cap**: Unless the user explicitly requests high-definition, print, publication, large-format, or a specific high pixel/DPI output, do not deliver a raster figure above 500 KB. Verify the saved file size rather than estimating it from `figsize` or DPI.
+- **Figure-integrity check**: A colorbar, legend, title, or blank canvas alone is never a valid scientific figure. Before delivering an export, confirm that the primary data axes were saved and occupy a meaningful part of the image. Never trade away the data panel to satisfy the default file-size cap.
 - Never use a diverging colormap for a strictly positive scalar field unless it encodes a meaningful threshold.
 - Never use a sequential colormap for an anomaly/bias field that needs positive/negative symmetry.
 - Never use dense wind arrows or dense significance dots that cover the actual meteorological field.

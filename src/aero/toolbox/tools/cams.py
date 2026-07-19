@@ -12,6 +12,7 @@ from aero.toolbox.config_access import find_config
 from aero.toolbox.download_progress import download_progress_reporter
 from aero.toolbox.paths import find_project_dir, short_path
 from aero.toolbox.registry import register_tool
+from aero.toolbox.secret_input import credential_request_for
 
 logger = structlog.get_logger()
 
@@ -298,6 +299,8 @@ async def download_cams(
     if not ads_cfg.key:
         return {
             "status": "error",
+            "setup_required": "ads",
+            "credential_request": credential_request_for("ads"),
             "message": (
                 "ADS API key 未配置。CAMS 数据来自 Copernicus Atmosphere Data Store，"
                 "请先配置 ADS Personal Access Token；它和 ERA5/CDS key 分开。"

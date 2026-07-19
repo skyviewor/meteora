@@ -41,6 +41,11 @@ def _vision_error_payload(exc: Exception, *, config, image_paths: list[str], det
     response_excerpt = getattr(exc, "response_excerpt", "")
     reason = str(exc).strip() or exc.__class__.__name__
     message = f"图片分析失败：{reason}"
+    if error_type == "timeout":
+        message += (
+            "\n\n请先调用 prepare_image_for_vision 生成压缩副本，"
+            "再用返回的 output_path 重试图片分析。"
+        )
     if status_code:
         message += f"（HTTP {status_code}）"
     if response_excerpt:

@@ -40,7 +40,7 @@ class _VisionModelConfig:
     def endpoint(self) -> str:
         if self.base_url:
             base_url = self.base_url.rstrip("/")
-            if base_url.endswith("/v1"):
+            if base_url.endswith(("/v1", "/v4")):
                 return base_url + "/chat/completions"
             return base_url + "/v1/chat/completions"
         if self.provider == "bailian":
@@ -103,6 +103,9 @@ class VisionClient:
         headers = {
             "Authorization": f"Bearer {self._config.api_key}",
             "Content-Type": "application/json",
+            # Avoid malformed Brotli responses observed on some provider/CDN routes.
+            # Images are uploaded in the request; the response itself is small.
+            "Accept-Encoding": "identity",
         }
 
         try:

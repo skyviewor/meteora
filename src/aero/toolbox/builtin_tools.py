@@ -36,6 +36,8 @@ from aero.toolbox.tools.configuration import (
     configure_earthdata_token,
     configure_llm_provider,
     list_llm_providers,
+    request_secret_input,
+    save_secret_handle,
 )
 
 
@@ -47,6 +49,7 @@ from aero.toolbox.tools.vision import (
     get_vision_usage,
     reset_vision_usage,
 )
+from aero.toolbox.tools.images import prepare_image_for_vision
 
 
 from aero.toolbox.tools.netcdf import inspect_nc, subset_netcdf
@@ -164,7 +167,7 @@ from aero.toolbox.tools.paper_versions import (
     save_paper_version,
 )
 from aero.toolbox.tools.paper_export import export_paper
-from aero.toolbox.tools.web_search import search_web
+from aero.toolbox.tools.web_search import check_web_search_status_tool, search_web
 from aero.toolbox.tools.subagents import cancel_sub_agent, launch_sub_agent, query_sub_agents
 from aero.toolbox.tools.tool_rounds import get_max_tool_rounds, set_max_tool_rounds
 
@@ -185,6 +188,7 @@ __all__ = [
     "check_gefs_availability",
     "check_gfs_availability",
     "check_ifs_availability",
+    "check_web_search_status_tool",
     "configure_ads_key",
     "configure_email_config",
     "configure_cds_key",
@@ -239,6 +243,8 @@ __all__ = [
     "paper_version_status",
     "query_sub_agents",
     "query_download",
+    "request_secret_input",
+    "save_secret_handle",
     "read_file",
     "read_pdf",
     "record_instruction",
@@ -263,6 +269,7 @@ __all__ = [
     "subset_netcdf",
     "retry_download",
     "analyze_image",
+    "prepare_image_for_vision",
     "check_vision_model_config",
     "get_vision_usage",
     "reset_vision_usage",

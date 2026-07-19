@@ -135,6 +135,13 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         background: #282828;
     }
 
+    #setup-provider-help {
+        margin: 0 0 1 0;
+        padding: 1;
+        background: #202020;
+        color: $text-muted;
+    }
+
     #setup-actions {
         width: 100%;
         height: 3;
@@ -212,6 +219,7 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             with Vertical(id="setup-form"):
                 yield Input(placeholder="接口地址（Endpoint）", id="setup-url", classes="setup-field")
                 yield Input(placeholder="模型 ID", id="setup-model", classes="setup-field")
+                yield Static("", id="setup-provider-help")
                 yield Input(placeholder="API Key", id="setup-key", password=True, classes="setup-field")
             with Horizontal(id="setup-actions"):
                 yield Static("继续", id="setup-next", classes="setup-action")
@@ -324,6 +332,9 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
 
         error.update("")
         form.display = False
+        for selector in self._FORM_INPUT_IDS:
+            self.query_one(selector, Input).display = True
+        self.query_one("#setup-provider-help", Static).display = False
         form.refresh(layout=True)
         self._set_actions(next_visible=False, back_visible=False)
 
@@ -381,6 +392,7 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                 subtitle.update("填写主模型连接信息。API Key 仅保存到用户级 secrets.yaml，不会写入项目配置。")
             form.display = True
             self._configure_primary_form()
+            self._show_preset_provider_help(self._primary.get("provider", ""))
             self._set_actions(
                 next_visible=True,
                 back_visible=not self._primary_only,
@@ -421,29 +433,51 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             subtitle.update("填写视觉模型连接信息。保存后，Aero 才会将图片发送给该模型进行分析。")
             form.display = True
             self._configure_vision_form()
+            self._show_preset_provider_help(self._vision.get("provider", ""))
             self._set_actions(next_visible=True, back_visible=True)
             self.query_one("#setup-next", Static).update("保存并继续")
             self._focus_first_visible_field()
         elif self._page == "web_search_setup":
-            subtitle.update("步骤 3 / 3：联网搜索可选。联网搜索依赖阿里云百炼（Bailian）API Key。如需查台风、天气、新闻等实时信息，请在此配置。")
+            subtitle.update("步骤 3 / 3：联网搜索可选。选择搜索供应商并配置 API Key；百炼还需要先在 MCP 广场开通联网搜索 MCP。")
             assert options is not None
-            already_bailian = (
-                self._vision.get("mode") == "separate"
-                and self._vision.get("provider") == "bailian"
-                and self._vision.get("api_key", "").strip()
+            bailian_source = self._reusable_search_credential("bailian")
+            zhipu_source = self._reusable_search_credential("zhipu")
+            provider_items = {
+                "bailian": (
+                    Option(f"复用{bailian_source}已配置的百炼 API Key（推荐）", id="reuse_bailian")
+                    if bailian_source
+                    else Option("配置百炼（需要开通 WebSearch MCP）", id="configure_bailian")
+                ),
+                "zhipu": (
+                    Option(f"复用{zhipu_source}已配置的智谱 API Key（推荐）", id="reuse_zhipu")
+                    if zhipu_source
+                    else Option("配置智谱 AI 搜索", id="configure_zhipu")
+                ),
+            }
+            primary_provider = next(
+                (
+                    provider
+                    for provider, source in (("bailian", bailian_source), ("zhipu", zhipu_source))
+                    if source == "主模型"
+                ),
+                "",
             )
-            items = [Option("暂不配置，需要时再提示", id="skip")]
-            if already_bailian:
-                items.append(Option("复用视觉模型已配置的百炼 API Key（推荐）", id="reuse_bailian"))
-            items.append(Option("配置百炼 API Key（启用联网搜索）", id="configure"))
+            items = (
+                [provider_items[primary_provider], Option("暂不配置，需要时再提示", id="skip")]
+                + [item for provider, item in provider_items.items() if provider != primary_provider]
+                if primary_provider
+                else [Option("暂不配置，需要时再提示", id="skip"), *provider_items.values()]
+            )
             options.add_options(items)
             self._set_actions(next_visible=False, back_visible=True)
             options.highlighted = 0
             options.focus()
         elif self._page == "web_search_form":
             title.update("配置联网搜索")
-            subtitle.update("填写百炼 API Key。该凭证仅用于联网搜索，不会影响主模型或视觉模型。")
+            subtitle.update("填写所选搜索供应商的 API Key。接口地址和搜索参数已内置，无需填写。")
             form.display = True
+            self.query_one("#setup-url", Input).display = False
+            self.query_one("#setup-model", Input).display = False
             self._configure_web_search_form()
             self._set_actions(next_visible=True, back_visible=True)
             self.query_one("#setup-next", Static).update("保存并开始使用")
@@ -497,10 +531,71 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         self._set_input("model", self._vision.get("model", ""))
         self._set_input("key", "")
 
+    def _show_preset_provider_help(self, provider: str) -> None:
+        """Show the key acquisition help instead of fixed preset fields."""
+        preset = BUILTIN_LLM_PROVIDERS.get(provider)
+        if preset is None:
+            return
+        self.query_one("#setup-url", Input).display = False
+        self.query_one("#setup-model", Input).display = False
+        help_text = self.query_one("#setup-provider-help", Static)
+        help_text.update(
+            f"获取 {preset.name} API Key：\n"
+            f"[link='{preset.api_key_url}']{preset.api_key_url}[/link]\n"
+            f"{preset.api_key_hint}"
+        )
+        help_text.display = True
+
     def _configure_web_search_form(self) -> None:
-        self._set_input("url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self._set_input("model", "qwen-turbo")
+        provider = self._web_search.get("provider", "bailian")
+        defaults = {
+            "bailian": ("https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-turbo"),
+            "zhipu": ("https://open.bigmodel.cn/api/paas/v4/web_search", "search_std"),
+        }
+        key_help = {
+            "bailian": (
+                "阿里云百炼",
+                "https://bailian.console.aliyun.com/cn-beijing/?apiKey=1&tab=globalset#/efm/api_key",
+                "还需要在 MCP 广场开通联网搜索 MCP。",
+            ),
+            "zhipu": (
+                "智谱 AI",
+                "https://open.bigmodel.cn/apikey/platform",
+                "在开放平台创建 API Key 后粘贴到下方。",
+            ),
+        }
+        url, model = defaults.get(provider, defaults["bailian"])
+        self._set_input("url", self._web_search.get("base_url", url))
+        self._set_input("model", self._web_search.get("model", model))
         self._set_input("key", self._web_search.get("api_key", ""))
+        name, key_url, hint = key_help.get(provider, key_help["bailian"])
+        help_text = self.query_one("#setup-provider-help", Static)
+        help_text.update(
+            f"获取 {name} API Key：\n[link='{key_url}']{key_url}[/link]\n{hint}"
+        )
+        help_text.display = True
+
+    def _reusable_search_credential(self, provider: str) -> str:
+        """Return the configured model role that can supply a search API key."""
+        vision_key = self._vision.get("api_key", "").strip()
+        if (
+            self._vision.get("mode") == "separate"
+            and self._vision.get("provider") == provider
+            and vision_key
+        ):
+            return "视觉模型"
+        primary_key = self._primary.get("api_key", "").strip()
+        if self._primary.get("provider") == provider and primary_key:
+            return "主模型"
+        return ""
+
+    def _search_credential(self, provider: str) -> str:
+        """Return the matching configured model key for the selected search provider."""
+        if self._reusable_search_credential(provider) == "视觉模型":
+            return self._vision.get("api_key", "").strip()
+        if self._reusable_search_credential(provider) == "主模型":
+            return self._primary.get("api_key", "").strip()
+        return ""
 
     def _set_input(self, name: str, value: str) -> None:
         widget = self.query_one(f"#setup-{name}", Input)
@@ -511,7 +606,11 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
 
     def _focus_first_visible_field(self) -> None:
         self._action_focused = False
-        self.set_focus(self.query_one(self._visible_input_ids()[0], Input))
+        visible = self._visible_input_ids()
+        # API keys are the only value users normally need to type on a
+        # pre-filled connection form, so place the cursor there first.
+        target = "#setup-key" if "#setup-key" in visible else visible[0]
+        self.set_focus(self.query_one(target, Input))
 
     def _move_form_focus(self, delta: int) -> None:
         field_ids = self._visible_input_ids()
@@ -645,10 +744,23 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                 self._finish()
                 return
             if choice == "reuse_bailian":
-                self._web_search = {"configured": True, "api_key": self._vision.get("api_key", "")}
+                self._web_search = {
+                    "configured": True,
+                    "provider": "bailian",
+                    "api_key": self._search_credential("bailian"),
+                }
                 self._finish()
                 return
-            self._web_search = {"configured": True}
+            if choice == "reuse_zhipu":
+                self._web_search = {
+                    "configured": True,
+                    "provider": "zhipu",
+                    "api_key": self._search_credential("zhipu"),
+                }
+                self._finish()
+                return
+            provider = "bailian" if choice == "configure_bailian" else choice.removeprefix("configure_")
+            self._web_search = {"configured": True, "provider": provider}
             self._page = "web_search_form"
         self._render_page()
 
@@ -694,8 +806,8 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
     def _form_values(self) -> dict[str, str]:
         if self._page == "web_search_form":
             return {
-                "provider": "bailian",
-                "label": "bailian",
+                "provider": self._web_search.get("provider", "bailian"),
+                "label": self._web_search.get("provider", "bailian"),
                 "base_url": self.query_one("#setup-url", Input).value.strip(),
                 "model": self.query_one("#setup-model", Input).value.strip(),
                 "api_key": self.query_one("#setup-key", Input).value.strip(),

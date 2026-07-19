@@ -15,7 +15,8 @@ from aero.core.llm_providers import (
 )
 
 
-def test_create_default_config():
+def test_create_default_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "missing-secrets.yaml"))
     config = AeroConfig.create_default()
     assert config.llm.provider == "deepseek"
     assert config.llm.model == "deepseek-v4-flash"
@@ -181,6 +182,46 @@ def test_default_config_uses_global_active_llm_profile(tmp_path, monkeypatch):
     assert config.llm.active_api_key() == "sk-kimi-global"
 
 
+@pytest.mark.parametrize(
+    ("provider", "model", "base_url"),
+    [
+        ("minimax", "MiniMax-M3", "https://api.minimaxi.com/v1"),
+        ("zhipu", "glm-4.6v-flashx", "https://open.bigmodel.cn/api/paas/v4"),
+    ],
+)
+def test_removed_llm_profile_falls_back_to_default_setup(
+    tmp_path, monkeypatch, provider, model, base_url
+):
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        yaml.dump(
+            {
+                "llm": {
+                    "active_provider": provider,
+                    "providers": {
+                        provider: {
+                            "api_key": "sk-removed",
+                            "model": model,
+                            "base_url": base_url,
+                        }
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+
+    config = AeroConfig.create_default()
+
+    assert config.llm.provider == "deepseek"
+    assert config.llm.model == "deepseek-v4-flash"
+    assert config.llm.base_url == ""
+    assert config.llm.active_api_key() == ""
+    if provider == "zhipu":
+        assert config.web_search.provider == "zhipu"
+        assert config.web_search.api_key == "sk-removed"
+
+
 def test_project_provider_api_keys_are_ignored(tmp_path, monkeypatch):
     secrets_path = tmp_path / "missing-secrets.yaml"
     monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
@@ -238,6 +279,19 @@ def test_llm_provider_presets():
     assert model_summary("bailian", "qwen3.7-plus").startswith("多模态")
     assert model_supports_vision("bailian", "qwen3.7-plus") is True
     assert model_supports_vision("bailian", "qwen3.7-max") is False
+
+
+def test_active_model_capabilities_refresh_when_switching_provider_profile():
+    config = AeroConfig.create_default()
+    config.llm.provider = "kimi"
+    profile = config.llm.provider_config("kimi")
+    profile.model = "kimi-k2.6"
+    profile.api_key = "sk-kimi-test"
+
+    config.llm.use_provider_settings()
+
+    assert config.llm.model == "kimi-k2.6"
+    assert config.llm.supports_vision is True
 
 
 def test_configure_llm_provider_tool(tmp_path, monkeypatch):
@@ -437,6 +491,30 @@ def test_separate_vision_credentials_are_not_saved_to_project_config(tmp_path, m
 
     assert "sk-vision-secret" not in config_path.read_text()
     assert "mode: separate" in config_path.read_text()
+
+
+def test_separate_vision_reuses_saved_bailian_profile_after_primary_switch(tmp_path, monkeypatch):
+    from aero.core.config import resolved_vision_config, vision_is_configured
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    config.llm.provider = "deepseek"
+    config.llm.model = "deepseek-v4-pro"
+    config.llm.provider_config("deepseek").api_key = "sk-deepseek"
+    bailian = config.llm.provider_config("bailian")
+    bailian.api_key = "sk-bailian"
+    bailian.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    config.vision.mode = "separate"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen3.6-plus"
+
+    assert vision_is_configured(config) is True
+    resolved = resolved_vision_config(config)
+    assert resolved is not None
+    assert resolved.provider == "bailian"
+    assert resolved.model == "qwen3.6-plus"
+    assert resolved.api_key == "sk-bailian"
+    assert resolved.base_url == bailian.base_url
 
 
 def test_save_user_secrets_is_owner_readable_only(tmp_path, monkeypatch):

@@ -382,6 +382,15 @@ async def download_dataset(
     except (OSError, RuntimeError) as exc:
         debug_exception("download_dataset failed", exc)
         payload = {"status": "error", "message": f"数据集下载失败：{exc}"}
+        if "Earthdata Login 授权" in str(exc):
+            from aero.toolbox.secret_input import credential_request_for
+
+            payload.update(
+                {
+                    "setup_required": "earthdata",
+                    "credential_request": credential_request_for("earthdata"),
+                }
+            )
         available = re.search(
             r"实际可用范围为 (\d{4}-\d{2}-\d{2}) 至 (\d{4}-\d{2}-\d{2})", str(exc)
         )

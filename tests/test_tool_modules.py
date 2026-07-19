@@ -70,6 +70,7 @@ MIGRATED_TOOLS = (
     "clear_cds_config",
     "check_vision_model_config",
     "analyze_image",
+    "prepare_image_for_vision",
     "configure_vision_model",
 )
 

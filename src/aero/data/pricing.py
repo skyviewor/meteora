@@ -61,9 +61,15 @@ PRICING: dict[str, ModelPrice] = {
         context_window=32_768,
     ),
     # Qwen / Bailian (CNY per 1K tokens)
+    # Prices are the standard China-mainland prices published by Model Studio;
+    # implicit cache hits for Bailian-hosted models cost 20% of input tokens.
     "qwen3.7": ModelPrice(
-        input_price=0.02, cached_input_price=0.02, output_price=0.06,
-        context_window=131_072,
+        input_price=0.002, cached_input_price=0.0004, output_price=0.008,
+        context_window=1_000_000,
+    ),
+    "qwen3.7-max": ModelPrice(
+        input_price=0.012, cached_input_price=0.0024, output_price=0.036,
+        context_window=1_000_000,
     ),
     "qwen-plus": ModelPrice(
         input_price=0.002, cached_input_price=0.002, output_price=0.006,
@@ -132,7 +138,7 @@ PRICING: dict[str, ModelPrice] = {
         context_window=1_000_000,
     ),
     "qwen3.7-plus": ModelPrice(
-        input_price=0.003, cached_input_price=0.003, output_price=0.012,
+        input_price=0.002, cached_input_price=0.0004, output_price=0.008,
         context_window=1_000_000,
     ),
 }
@@ -153,13 +159,6 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "kimi-k2.7-code": 262_144,
     "kimi-k2.6": 262_144,
     "kimi-k2.5": 262_144,
-    "glm-5": 200_000,
-    "glm-5.1-highspeed": 200_000,
-    "glm-4.6v": 128_000,
-    "glm-4.6v-flashx": 128_000,
-    "minimax-m3": 1_000_000,
-    "minimax-m2.7": 204_800,
-    "minimax-m2.5": 204_800,
 }
 
 

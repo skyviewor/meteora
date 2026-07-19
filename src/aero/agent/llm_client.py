@@ -66,7 +66,7 @@ class LLMConfig:
     def endpoint(self) -> str:
         if self.base_url:
             base_url = self.base_url.rstrip("/")
-            if base_url.endswith("/v1"):
+            if base_url.endswith(("/v1", "/v4")):
                 return base_url + "/chat/completions"
             return base_url + "/v1/chat/completions"
         if self.provider == "deepseek":
@@ -247,7 +247,9 @@ class LLMClient:
                                     )
                                     content_sent = marker_start
                             elif not tool_calls_buffer:
-                                safe_end = _safe_content_stream_end(content_buffer, content_sent)
+                                safe_end = _safe_content_stream_end(
+                                    content_buffer, content_sent
+                                )
                                 if safe_end > content_sent:
                                     emitted = True
                                     yield StreamEvent(
@@ -285,6 +287,9 @@ class LLMClient:
         return {
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
+            # Some provider/CDN routes have returned invalid Brotli frames.  Model
+            # responses are small enough that avoiding content encoding is safer.
+            "Accept-Encoding": "identity",
         }
 
     async def _send(
@@ -366,14 +371,34 @@ def _raise_for_status(response: httpx.Response) -> None:
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
         status = e.response.status_code
+        body = e.response.text
+        lowered_body = body.lower()
+        request_id = _request_id_from_error_body(body)
+        if status == 402 or any(
+            marker in lowered_body
+            for marker in (
+                "insufficient_balance",
+                "insufficient balance",
+                "insufficient_quota",
+                "quota exceeded",
+                "quota_exceeded",
+                "余额不足",
+                "arrearage",
+            )
+        ):
+            provider = _provider_name_from_response(e.response)
+            suffix = f" 请求 ID：{request_id}。" if request_id else ""
+            raise RuntimeError(
+                f"{provider}账户余额不足或当前套餐额度已用尽，无法调用模型。"
+                f"请登录{provider}开放平台充值或检查可用额度后重试。{suffix}"
+            ) from e
         if status == 401:
             raise RuntimeError(
                 "LLM API 未授权（401）：当前模型服务商的 API key 无效或不匹配。"
             ) from e
         if status == 429:
-            raise RuntimeError("LLM API 请求过快或额度不足（429），请稍后再试。") from e
+            raise RuntimeError(_rate_limit_error_message(e.response, body, request_id)) from e
         if status == 400:
-            body = e.response.text
             if "Content Exists Risk" in body:
                 raise RuntimeError(
                     "当前对话内容被模型服务商的安全策略拦截（Content Exists Risk）。\n"
@@ -387,7 +412,77 @@ def _raise_for_status(response: httpx.Response) -> None:
                 ) from e
         if 500 <= status < 600:
             raise RuntimeError(f"LLM 服务暂时不可用（{status}），请稍后再试。") from e
-        raise RuntimeError(f"LLM API 请求失败（HTTP {status}）：{e.response.text}") from e
+        raise RuntimeError(f"LLM API 请求失败（HTTP {status}）：{body}") from e
+
+
+def _provider_name_from_response(response: httpx.Response) -> str:
+    host = (response.request.url.host or "").lower()
+    if "aliyuncs" in host:
+        return "阿里云百炼 "
+    if "deepseek" in host:
+        return "DeepSeek "
+    if "moonshot" in host or "kimi" in host:
+        return "Kimi "
+    return "模型服务"
+
+
+def _request_id_from_error_body(body: str) -> str:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("request_id", "requestId", "RequestId"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _rate_limit_error_message(response: httpx.Response, body: str, request_id: str) -> str:
+    """Explain HTTP 429 from the provider without guessing its billing state."""
+    provider = _provider_name_from_response(response)
+    detail = _error_message_from_body(body).lower()
+    suffix_parts = []
+    retry_after = response.headers.get("retry-after")
+    if retry_after:
+        suffix_parts.append(f"建议等待 {retry_after} 秒后重试")
+    if request_id:
+        suffix_parts.append(f"请求 ID：{request_id}")
+    suffix = f"（{'；'.join(suffix_parts)}）" if suffix_parts else ""
+
+    if any(
+        marker in detail
+        for marker in ("rate limit", "rate_limit", "too many requests", "并发", "频率")
+    ):
+        return f"{provider}当前触发请求频率或并发限制（429）。请稍后重试。{suffix}"
+    return (
+        f"{provider}拒绝了本次请求（HTTP 429），但接口未说明具体原因。"
+        "这通常与请求频率、并发数或账户可用额度有关；请检查开放平台的余额/套餐额度和限流状态后重试。"
+        f"{suffix}"
+    )
+
+
+def _error_message_from_body(body: str) -> str:
+    """Read common OpenAI-compatible error message locations safely."""
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if not isinstance(payload, dict):
+        return body
+    error = payload.get("error")
+    if isinstance(error, dict):
+        for key in ("message", "type", "code"):
+            value = error.get(key)
+            if value:
+                return str(value)
+    for key in ("message", "type", "code"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return body
 
 
 async def _raise_for_status_stream(response: httpx.Response) -> None:

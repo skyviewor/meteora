@@ -1,4 +1,4 @@
-"""Reusable throttled download progress reporting."""
+"""Reusable byte-granular download progress reporting."""
 
 from __future__ import annotations
 
@@ -32,25 +32,13 @@ def format_duration(seconds: float) -> str:
 def download_progress_reporter():
     progress_id = next(_PROGRESS_IDS)
     start_time = time.monotonic()
-    last_emit_time = 0.0
-    last_percent = -1
-
     def report(done: int, total: int, *, force: bool = False) -> None:
-        nonlocal last_emit_time, last_percent
         if total <= 0:
             return
 
         percent_value = min(100.0, done * 100 / total)
         percent = int(percent_value)
         now = time.monotonic()
-        if not force and percent < 100 and percent == last_percent and now - last_emit_time < 2:
-            return
-        same_step = percent // 5 == last_percent // 5
-        if not force and percent < 100 and now - last_emit_time < 2 and same_step:
-            return
-
-        last_percent = percent
-        last_emit_time = now
         elapsed = max(now - start_time, 0.001)
         speed = done / elapsed
         eta = format_duration((total - done) / speed) if speed > 0 else "未知"

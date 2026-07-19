@@ -14,7 +14,9 @@ from aero.core.types import DownloadResult
 
 logger = structlog.get_logger()
 
-CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB
+# Keep progress responsive on slow CDS connections: each received 10 KiB is
+# written and reported immediately instead of waiting for a multi-megabyte read.
+CHUNK_SIZE = 10 * 1024  # 10 KiB
 DOWNLOAD_TIMEOUT = httpx.Timeout(connect=30.0, read=30.0, write=30.0, pool=30.0)
 
 

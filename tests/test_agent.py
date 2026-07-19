@@ -978,6 +978,33 @@ def test_direct_tool_response_preserves_vision_setup_message():
     )
 
 
+@pytest.mark.asyncio
+async def test_agent_blocks_repeated_and_excessive_vision_analysis(tmp_path):
+    from aero.agent.loop import AgentLoop
+
+    image = tmp_path / "figure.png"
+    image.write_bytes(b"first version")
+    agent = AgentLoop(AeroConfig.create_default())
+    args = {"image_paths": [str(image)]}
+    try:
+        assert agent._vision_analysis_block_reason(args) is None
+        agent._record_successful_vision_images(args)
+        assert "已成功分析过" in (agent._vision_analysis_block_reason(args) or "")
+
+        agent._reset_turn_vision_guard()
+        second_image = tmp_path / "second.png"
+        third_image = tmp_path / "third.png"
+        second_image.write_bytes(b"second version")
+        third_image.write_bytes(b"third version")
+        assert agent._vision_analysis_block_reason(args) is None
+        assert agent._vision_analysis_block_reason({"image_paths": [str(second_image)]}) is None
+        assert "达到 2 次上限" in (
+            agent._vision_analysis_block_reason({"image_paths": [str(third_image)]}) or ""
+        )
+    finally:
+        await agent.close()
+
+
 def test_agent_applies_llm_config_update(tmp_path, monkeypatch):
     from aero.agent.loop import AgentLoop
     from aero.core.config import clear_llm_api_key, save_llm_api_key

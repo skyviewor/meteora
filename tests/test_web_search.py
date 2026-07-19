@@ -155,7 +155,57 @@ async def test_search_web_guides_setup_when_vision_key_is_missing(monkeypatch):
     assert result["api_key_configured"] is False
     assert result["credential_reused"] is False
     assert "百炼 API Key" in result["error"]
-    assert result["references"]
+    assert "开通“联网搜索 MCP”" in result["message"]
+    assert len(result["references"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_check_web_search_status_reports_missing_credential(monkeypatch):
+    config = AeroConfig.create_default()
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    result = await web_search.check_web_search_status()
+
+    assert result["available"] is False
+    assert result["api_key_configured"] is False
+    assert "暂不可用" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_check_web_search_status_verifies_live_service(monkeypatch):
+    config = AeroConfig.create_default()
+    config.web_search.api_key = "sk-search-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+    captured = {}
+
+    async def fake_check(api_key):
+        captured["api_key"] = api_key
+        return "web_search"
+
+    monkeypatch.setattr(web_search, "check_bailian_web", fake_check)
+
+    result = await web_search.check_web_search_status()
+
+    assert result["available"] is True
+    assert result["service_tool"] == "web_search"
+    assert captured["api_key"] == "sk-search-secret"
+    assert "sk-search-secret" not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_check_web_search_status_does_not_overclaim_direct_provider(monkeypatch):
+    config = AeroConfig.create_default()
+    config.web_search.provider = "zhipu"
+    config.web_search.api_key = "sk-zhipu-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    result = await web_search.check_web_search_status()
+
+    assert result["available"] is False
+    assert result["status_unknown"] is True
+    assert "余额" in result["message"]
+    assert "智谱 AI 开放平台" in result["action_required"]
+    assert "sk-zhipu-secret" not in repr(result)
 
 
 @pytest.mark.asyncio
@@ -179,6 +229,47 @@ async def test_search_web_explains_unavailable_mcp_service(monkeypatch):
     assert len(result["references"]) == 2
 
 
+@pytest.mark.asyncio
+async def test_search_web_explains_bailian_balance_and_mcp_requirements(monkeypatch):
+    config = AeroConfig.create_default()
+    config.web_search.api_key = "sk-bailian-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("HTTP 402 insufficient_quota")
+
+    monkeypatch.setattr(web_search, "search_bailian_web", fail)
+
+    result = await web_search.search_web("杭州天气")
+
+    assert result["found"] is False
+    assert "账户余额不足" in result["error"]
+    assert "WebSearch MCP" in result["error"]
+    assert "账户余额" in result["action_required"]
+    assert "MCP 广场" in result["action_required"]
+
+
+@pytest.mark.asyncio
+async def test_search_web_explains_provider_balance_or_quota_failure(monkeypatch):
+    config = AeroConfig.create_default()
+    config.web_search.provider = "zhipu"
+    config.web_search.api_key = "sk-zhipu-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    async def fail(*args, **kwargs):
+        raise RuntimeError("智谱 AI HTTP 402: insufficient_quota")
+
+    monkeypatch.setattr(web_search, "search_zhipu_web", fail)
+
+    result = await web_search.search_web("最近一次西太平洋台风")
+
+    assert result["found"] is False
+    assert "余额不足" in result["error"]
+    assert "账户余额" in result["action_required"]
+    assert "智谱 AI 开放平台" in result["action_required"]
+    assert "sk-zhipu-secret" not in repr(result)
+
+
 def test_search_web_is_registered_without_confirmation():
     from aero.toolbox.registry import get_registry
 
@@ -187,3 +278,12 @@ def test_search_web_is_registered_without_confirmation():
     assert spec is not None
     assert spec.requires_confirmation is False
     assert "最新信息" in spec.description
+
+
+def test_web_search_status_is_registered_without_confirmation():
+    from aero.toolbox.registry import get_registry
+
+    spec = get_registry().get("check_web_search_status")
+
+    assert spec is not None
+    assert spec.requires_confirmation is False

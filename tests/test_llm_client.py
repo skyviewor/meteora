@@ -9,6 +9,7 @@ from aero.agent.llm_client import (
     _find_tool_call_marker_start,
     _parse_args,
     _parse_content_tool_calls,
+    _raise_for_status,
     _raise_for_status_stream,
     _safe_content_stream_end,
 )
@@ -177,6 +178,38 @@ def test_request_body_omits_empty_reasoning_effort():
     body = client._request_body([Message(role="user", content="Hi")])
 
     assert "reasoning_effort" not in body
+
+
+def test_llm_request_does_not_accept_brotli_response():
+    client = LLMClient(LLMConfig(api_key="sk-test"))
+
+    assert client._headers()["Accept-Encoding"] == "identity"
+
+
+def test_llm_rate_limit_error_describes_rate_limit_and_retry_time():
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://api.moonshot.cn/v1/chat/completions"),
+        headers={"retry-after": "15"},
+        json={"error": {"message": "rate limit exceeded"}, "request_id": "req-123"},
+    )
+
+    with pytest.raises(RuntimeError, match="请求频率或并发限制") as exc_info:
+        _raise_for_status(response)
+
+    assert "等待 15 秒" in str(exc_info.value)
+    assert "req-123" in str(exc_info.value)
+
+
+def test_llm_unknown_429_does_not_claim_balance_is_definitely_insufficient():
+    response = httpx.Response(
+        429,
+        request=httpx.Request("POST", "https://api.moonshot.cn/v1/chat/completions"),
+        json={"error": {"message": "request rejected"}},
+    )
+
+    with pytest.raises(RuntimeError, match="未说明具体原因"):
+        _raise_for_status(response)
 
 
 @pytest.mark.asyncio
