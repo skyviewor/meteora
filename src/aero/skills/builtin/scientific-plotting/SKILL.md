@@ -53,12 +53,217 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Save temporary plotting scripts under `scripts/tmp/`.
    - Save generated figures under `figures/`.
    - Default to a delivered raster figure no larger than **500 KB** (that is, `500 * 1024` bytes). This is a hard delivery limit unless the user explicitly asks for a high-definition, print, publication, or large-format figure.
-   - Start with a compact canvas and raster DPI (normally no larger than about 7 × 5 inches and 120 DPI), tight bounding boxes, and minimal padding. Do not enlarge the canvas just to fill screen space.
+   - Start with a compact canvas and raster DPI (normally no larger than about 7 × 5 inches and 120 DPI), a layout engine such as `layout="compressed"`/`layout="constrained"`, and minimal padding. Do not enlarge the canvas just to fill screen space or use `bbox_inches="tight"` as a substitute for layout.
    - After every default raster export, check the actual file size. If it exceeds 500 KB, regenerate it with a smaller canvas/DPI and, if still readable, apply lossless PNG optimization or a suitable compressed format. Repeat until it is within the limit while keeping labels, colorbars, and key scientific features legible.
    - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop pixels to meet the limit, detect and trim “white space” programmatically, save only a colorbar axis, or remove the main map/data axes. For Cartopy maps or figures built with `fig.add_axes`, do not use `bbox_inches="tight"` unless the saved result has been visually verified.
    - Before reporting a figure, visually inspect the exported file (not only the plotting window) and verify that it includes the primary data panel, title/metadata where applicable, and colorbar/legend. If the exported dimensions or aspect ratio are implausible for the requested figure, treat it as a failed export and regenerate it rather than delivering it.
    - Treat a user request for "高清", "高分辨率", "大图", "出版", "印刷", "publication", "print", or an explicit pixel/DPI target as the only exception to the 500 KB default. State the resulting file size when using that exception.
    - When reporting a generated image, use Markdown image syntax such as `![description](figures/name.png)`.
+
+## Safe compact export for Cartopy maps
+
+For a normal single-panel Cartopy map, use this pattern instead of manually tuning
+`subplots_adjust`, creating a separate colorbar axes, or passing
+`bbox_inches="tight"` to `savefig`. `layout="compressed"` automatically reduces
+unnecessary whitespace around fixed-aspect map axes while `Figure.colorbar` reserves
+space for the colorbar as part of the same layout.
+
+Do not use `fig.add_axes([left, bottom, width, height], projection=...)` for the
+main fixed-aspect map unless a deliberately custom editorial layout is required. A
+manually allocated axes box that is taller or narrower than the map extent leaves a
+large unused white area after Cartopy preserves the map aspect ratio. Instead, use
+`plt.subplots(..., layout="compressed")` and choose a canvas whose rough aspect
+ratio matches the requested geographic extent. For example, China’s approximate
+64° × 40° PlateCarree extent works well with `figsize=(8, 5.4)`; put a figure-wide
+title in `fig.suptitle(...)` so the layout engine reserves space for it.
+
+```python
+import cartopy.crs as ccrs
+from cartopy.util import add_cyclic_point
+import matplotlib.pyplot as plt
+
+# `lon`, `lat`, and `field` are the already validated data coordinates and 2-D field.
+field_wrapped, lon_wrapped = add_cyclic_point(field, coord=lon)
+fig, ax = plt.subplots(
+    figsize=(7, 4),
+    layout="compressed",
+    subplot_kw={"projection": ccrs.PlateCarree(central_longitude=180)},
+)
+
+mesh = ax.pcolormesh(
+    lon_wrapped, lat, field_wrapped,
+    transform=ccrs.PlateCarree(),
+    cmap="RdBu_r", vmin=-40, vmax=40,
+)
+ax.set_global()
+ax.coastlines(linewidth=0.5)
+ax.set_title("ERA5 daily mean 2 m temperature — 2026-07-01", fontsize=12)
+
+cbar = fig.colorbar(
+    mesh, ax=ax, orientation="horizontal", pad=0.05, shrink=0.88, aspect=28,
+)
+cbar.set_label("2 m temperature (°C)")
+
+# Deliberately omit bbox_inches="tight".  The layout engine owns the spacing.
+fig.savefig("figures/era5_t2m.png", dpi=120, facecolor="white")
+plt.close(fig)
+```
+
+For a **vertical** colorbar, do not use a rotated unit-only axis label such as
+`cbar.set_label("°C")`. Put the unit at the top in normal horizontal text instead:
+
+```python
+cbar = fig.colorbar(mesh, ax=ax, orientation="vertical")
+cbar.ax.set_title("°C", fontsize=10, pad=5)
+```
+
+For a horizontal colorbar, keep the descriptive variable-and-unit label below the
+bar with `cbar.set_label("2 m temperature (°C)")`.
+
+Use `layout="constrained"` instead if the figure has multiple panels or a more
+complex GridSpec; do not combine either layout mode with `tight_layout()` or with
+`bbox_inches="tight"`. If a default export exceeds 500 KB, lower only the export
+DPI (for example, 120 → 100 → 85) and re-export the same full Figure. Do not
+change axes positions or crop pixels to reduce file size.
+
+## Regional PlateCarree map ticks and gridlines
+
+For a rectangular regional map on a plain `ccrs.PlateCarree()` axes, prefer
+normal GeoAxes ticks over `gridlines(draw_labels=True)`. Cartopy Gridliner labels
+can sit outside the layout bounds and be clipped at export. Standard ticks are
+known to Matplotlib's layout engine, so `layout="compressed"` or
+`layout="constrained"` reserves their space automatically.
+
+```python
+import numpy as np
+import cartopy.crs as ccrs
+from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
+
+extent = (115.3, 117.8, 39.3, 41.4)  # west, east, south, north
+ax.set_extent(extent, crs=ccrs.PlateCarree())
+
+lon_ticks = np.arange(np.ceil(extent[0] * 2) / 2, extent[1] + 0.01, 0.5)
+lat_ticks = np.arange(np.ceil(extent[2] * 10) / 10, extent[3] + 0.01, 0.3)
+ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())
+ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())
+ax.xaxis.set_major_formatter(LongitudeFormatter(number_format=".1f"))
+ax.yaxis.set_major_formatter(LatitudeFormatter(number_format=".1f"))
+ax.tick_params(axis="both", labelsize=8, pad=3)
+
+# Draw a subdued dashed grid without asking Gridliner to draw duplicate labels.
+ax.gridlines(
+    xlocs=lon_ticks, ylocs=lat_ticks, draw_labels=False,
+    linestyle="--", linewidth=0.4, color="grey", alpha=0.55,
+)
+```
+
+Choose tick intervals appropriate to the geographic extent. Keep gridlines light
+and visually subordinate by default; use a light dashed style (`"--"`) so they do
+not compete with geographic boundaries or data contours. Do **not** use this tick
+pattern for Lambert, polar, Robinson, or other
+non-rectangular projections: use Cartopy Gridliner for those, and keep labels on
+the requested sides with a layout-aware margin.
+
+## Aspect-aware multi-panel map layouts
+
+Do not give every regional map a square panel. A narrow/tall province (for
+example Shaanxi) placed in a wide square grid wastes most of every axes; a wide
+national map has the inverse problem. For `PlateCarree`, estimate the map's
+rendered aspect from its extent, then derive the Figure size from that aspect and
+the panel grid:
+
+```python
+import numpy as np
+
+def aspect_aware_grid_size(extent, nrows, ncols, panel_height=2.45):
+    west, east, south, north = extent
+    # Longitude is shorter in rendered distance away from the equator.
+    map_aspect = (
+        (east - west) * np.cos(np.deg2rad((south + north) / 2))
+        / (north - south)
+    )
+    width = np.clip(ncols * panel_height * map_aspect + 0.60, 4.8, 11.0)
+    height = nrows * panel_height + 1.00  # title + shared horizontal colorbar
+    return float(width), float(height)
+
+figsize = aspect_aware_grid_size(extent, nrows=3, ncols=3)
+fig, axes = plt.subplots(
+    3, 3, figsize=figsize, layout="compressed",
+    subplot_kw={"projection": ccrs.PlateCarree()},
+)
+```
+
+Use `layout="compressed"` with this pattern: it removes unused layout space
+around fixed-aspect GeoAxes without cropping pixels. Then make geographic tick
+density match each panel's available width/height. Use a 1/2/2.5/5 × 10^n
+“nice” step, targeting at most about four longitude intervals and six latitude
+intervals for a compact 3×3 grid. Do not retain dense half-degree labels merely
+because they fit a single-panel version of the same map.
+
+This is an estimate, not a replacement for visual verification: inspect the
+export, and increase the minimum canvas width or reduce tick density if labels
+overlap. Do not restore a wide square canvas just to avoid calculating the map
+aspect; it reintroduces the original empty-space problem.
+
+## Multi-panel China comparison maps
+
+For a China map with two or more comparable panels (for example different times
+or ensemble members), apply the complete map contract to **every** panel rather
+than treating the first panel as the only complete map:
+
+- Use one shared `levels`, `cmap`, and `norm` for all panels, and pass
+  `extend="both"` to **every** `contourf` call. Build the shared colorbar from
+  that same mappable so its two endpoint triangles describe the actual panel
+  encoding.
+- Draw the applicable national, provincial, or study-area boundary and a light
+  dashed longitude/latitude grid in every panel. Use ordinary GeoAxes ticks and
+  show labels only on the outer left and bottom edges, so interior panels retain
+  the grid without duplicated labels.
+- Add a bottom-right South China Sea inset to **every panel only when the main
+  view is a national China map**. Clip those national main panels to the
+  mainland polygon, but render each inset with the full China polygon collection
+  so South China Sea islands are not lost. Do **not** add a South China Sea inset
+  to a provincial, city, or other regional map such as Shaanxi.
+- Use `layout="constrained"` for the panel grid and one external shared
+  colorbar; do not add a separate colorbar for each panel.
+
+```python
+# Shared setup before the loop.
+extent, scs_extent = [72, 136, 15, 55], [105, 123, 2, 25]
+lon_ticks, lat_ticks = np.arange(80, 136, 10), np.arange(20, 56, 10)
+
+for index, (ax, field) in enumerate(zip(axes.flat, fields)):
+    row, col = divmod(index, 2)
+    cs = ax.contourf(
+        lon, lat, field, levels=levels, cmap=cmap, norm=norm,
+        extend="both", transform=ccrs.PlateCarree(),
+    )
+    clip_contours_by_map(cs, china_mainland, ax=ax)
+    draw_map(china_mainland, ax=ax, color="#333333", linewidth=0.6)
+    ax.set_extent(extent, crs=ccrs.PlateCarree())
+    ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())
+    ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())
+    ax.tick_params(axis="x", labelbottom=(row == 1), labelsize=7)
+    ax.tick_params(axis="y", labelleft=(col == 0), labelsize=7)
+    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, draw_labels=False,
+                 linestyle="--", linewidth=0.3, color="grey", alpha=0.4)
+
+# National-China maps only: repeat the inset for every panel.
+if is_national_china_map:
+    for ax, field in zip(axes.flat, fields):
+        inset = ax.inset_axes([0.78, 0.05, 0.20, 0.25], transform=ax.transAxes,
+                              projection=ccrs.PlateCarree())
+        inset_cs = inset.contourf(
+            lon, lat, field, levels=levels, cmap=cmap, norm=norm,
+            extend="both", transform=ccrs.PlateCarree(),
+        )
+        clip_contours_by_map(inset_cs, china_full, ax=inset)
+        draw_maps(china_full, ax=inset, color="#333333", linewidth=0.35)
+        inset.set_extent(scs_extent, crs=ccrs.PlateCarree())
+        inset.set_xticks([]); inset.set_yticks([])
+
+fig.colorbar(cs, ax=axes.ravel().tolist(), orientation="horizontal", ticks=levels)
+```
 
 ## Reference loading guide
 
@@ -67,6 +272,8 @@ Read only the files needed for the task:
 - `references/china-borders.md`: China boundaries, cnmaps, South China Sea/inset considerations, clipping/masking rules.
 - `references/colormaps-and-units.md`: Matplotlib colormaps, cmaps/NCL colormaps, variable-specific color logic, units, colorbar conventions.
 - `references/meteorological-maps.md`: Map projections, map layers, contours, wind vectors, precipitation/radar/satellite/cross-section rules.
+- `Safe compact export for Cartopy maps` above: Default pattern for a one-panel Cartopy map with a colorbar. Use it before introducing manual axes positions or any tight-bbox export.
+- `Regional PlateCarree map ticks and gridlines` above: Default label/grid pattern for a rectangular local PlateCarree map; use it to avoid clipped Gridliner labels.
 - `references/publication-quality.md`: Multi-panel layout, journal/export quality, typography, CJK font handling with mplfonts, labels, colorbar placement, accessibility.
 - `references/reproducibility.md`: Metadata, processing disclosure, station interpolation, anomaly baselines, significance marking, QA checklist.
 - `references/time-series.md`: Time-axis rules, UTC/local time, accumulations, dual axes, verification plots, ensemble/uncertainty display.
@@ -82,6 +289,7 @@ These rules must be followed without exception. They override convenience, aesth
 - **Colormaps**: Never use `jet`/rainbow for continuous scalar fields. Positive fields (precip, wind speed, humidity, reflectivity) must use sequential colormaps. Anomaly/bias fields must use diverging colormaps centered at zero.
 - **Metadata**: Never omit units, valid time, variable level, or accumulation window when they matter scientifically. Colorbar must always be labeled with variable name and unit.
 - **Locked scales**: Never let each panel in a comparison auto-scale independently unless the user explicitly asks and the caption clearly says so. Same variable = same `vmin`/`vmax` across panels, times, and models.
+- **Finite contour levels**: When using `contourf` with an explicitly finite `levels` range, pass `extend="both"` by default so valid values below/above the selected display range use the end colors rather than becoming blank. The colorbar must show the corresponding end triangles. Do not use `extend` to conceal NaN/masked data: investigate and represent genuine missing data separately.
 - **Default file-size cap**: Unless the user explicitly requests high-definition, print, publication, large-format, or a specific high pixel/DPI output, do not deliver a raster figure above 500 KB. Verify the saved file size rather than estimating it from `figsize` or DPI.
 - **Figure-integrity check**: A colorbar, legend, title, or blank canvas alone is never a valid scientific figure. Before delivering an export, confirm that the primary data axes were saved and occupy a meaningful part of the image. Never trade away the data panel to satisfy the default file-size cap.
 - Never use a diverging colormap for a strictly positive scalar field unless it encodes a meaningful threshold.

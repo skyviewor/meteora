@@ -659,7 +659,8 @@ def _skill_enforcement(skill_context: str, lang: str) -> str:
 4. **出图质量**：发表级出图至少 300 DPI，矢量图用 PDF/SVG，检查和确认 CJK 字体渲染正常。
    含中文、日文或韩文文本的 Matplotlib 脚本必须显式调用 `from mplfonts import use_font` 和 `use_font("Noto Sans CJK SC")`；禁止硬编码系统字体路径或用未经验证的 `font.sans-serif` 列表覆盖字体配置。
 5. **声明处理步骤**：禁止将插值站点场、再分析场、平滑场、AI 生成场包装为"原始观测"。所有处理方法必须披露。
-6. **以上规则覆盖所有绘图默认行为**，不可因"看起来好看"或"代码更方便"而违反。""")
+6. **中国多子图地图**：当中国区域图有两个及以上面板时，每个面板必须使用同一 `levels`/`cmap`/`norm`，并在每次 `contourf` 中明确传入 `extend="both"`；每个主面板必须绘制轻量虚线经纬网。共享 colorbar 必须展示两端三角，不能仅完成其中一个面板。只有“中国全图”才要求每个面板配南海插图；省、市或其他区域图（例如陕西）禁止为了套模板而增加南海插图。
+7. **以上规则覆盖所有绘图默认行为**，不可因"看起来好看"或"代码更方便"而违反。""")
         else:
             blocks.append("""### scientific-plotting Enforcement (HARD RULE)
 When the `scientific-plotting` skill is active, the following rules are **mandatory — violation is an error**:
@@ -670,7 +671,8 @@ When the `scientific-plotting` skill is active, the following rules are **mandat
 4. **Export quality**: Publication figures must be at least 300 DPI. Prefer PDF/SVG for vector output. Verify CJK font rendering is correct.
    Matplotlib scripts containing Chinese, Japanese, or Korean text must explicitly call `from mplfonts import use_font` and `use_font("Noto Sans CJK SC")`. Never hard-code system font paths or override the font configuration with an unverified `font.sans-serif` list.
 5. **Disclose processing**: NEVER present interpolated station fields, reanalysis, smoothed, or AI-generated fields as "raw observations". All processing must be disclosed.
-6. **These rules override all plotting defaults**. Do not violate them for convenience or aesthetics.""")
+6. **China multi-panel maps**: When a China-region map has two or more panels, every panel MUST use the same `levels`/`cmap`/`norm` and explicitly pass `extend="both"` to each `contourf`; every main panel MUST draw light dashed gridlines. The shared colorbar MUST show both endpoint triangles. Completing only one panel is not acceptable. Require a South China Sea inset in every panel only for a national China map; do not add one mechanically to provincial, city, or other regional maps such as Shaanxi.
+7. **These rules override all plotting defaults**. Do not violate them for convenience or aesthetics.""")
 
     china_block_zh = """### 中国国界线强制约束
 **这是最高优先级的硬性要求，违反即为严重错误：**

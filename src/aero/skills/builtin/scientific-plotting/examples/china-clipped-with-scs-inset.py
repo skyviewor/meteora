@@ -16,6 +16,7 @@ import xarray as xr
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import cartopy.crs as ccrs
+from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cnmaps import clip_contours_by_map, draw_map, draw_maps, get_adm_maps
 from mplfonts import use_font
 
@@ -47,35 +48,40 @@ cmap_colors = [
     '#8b0000', '#4a0000', '#1a0000',
 ]
 cmap = mcolors.ListedColormap(cmap_colors)
-norm = mcolors.BoundaryNorm(levels, cmap.N, extend='max')
+norm = mcolors.BoundaryNorm(levels, cmap.N, extend='both')
 cb_ticks = [0, 10, 50, 100, 200, 400, 600, 800]
 
 # ── 4. Figure & main map ──
-fig = plt.figure(figsize=(10, 8), facecolor='white')
-ax = fig.add_axes([0.06, 0.10, 0.68, 0.82], projection=ccrs.PlateCarree())
+fig, ax = plt.subplots(
+    figsize=(8, 5.4), layout='compressed', facecolor='white',
+    subplot_kw={'projection': ccrs.PlateCarree()},
+)
 
 cs = ax.contourf(
     field_crop.longitude, field_crop.latitude, field_crop.values,
-    levels=levels, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(),
+    levels=levels, cmap=cmap, norm=norm, extend='both', transform=ccrs.PlateCarree(),
 )
 clip_contours_by_map(cs, china_mainland, ax=ax)
 draw_map(china_mainland, ax=ax, color='#333333', linewidth=0.8)
 
 ax.set_extent([72, 136, 15, 55], crs=ccrs.PlateCarree())
-ax.set_title('Your Title Here', fontsize=14, fontweight='bold', pad=8)
+fig.suptitle('Your Title Here', fontsize=14, fontweight='bold')
 
-gl = ax.gridlines(
-    draw_labels=True, linewidth=0.3, color='gray', alpha=0.35,
-    xlocs=np.arange(70, 141, 10), ylocs=np.arange(10, 56, 10),
+lon_ticks = np.arange(80, 136, 10)
+lat_ticks = np.arange(20, 56, 10)
+ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())
+ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())
+ax.xaxis.set_major_formatter(LongitudeFormatter(number_format='.0f'))
+ax.yaxis.set_major_formatter(LatitudeFormatter(number_format='.0f'))
+ax.tick_params(axis='both', labelsize=8, pad=3)
+ax.gridlines(
+    draw_labels=False, linewidth=0.3, color='gray', alpha=0.35,
+    linestyle='--', xlocs=lon_ticks, ylocs=lat_ticks,
 )
-gl.top_labels = False
-gl.right_labels = False
-gl.xlabel_style = {'size': 8}
-gl.ylabel_style = {'size': 8}
 
 # ── 5. Colorbar (auto-aligned with axes height) ──
 cbar = fig.colorbar(cs, ax=ax, ticks=cb_ticks, fraction=0.022, pad=0.03)
-cbar.set_label('mm', fontsize=10, labelpad=6)
+cbar.ax.set_title('mm', fontsize=10, pad=5)
 cbar.ax.tick_params(labelsize=8, length=2, pad=2)
 
 # ── 6. South China Sea inset ──
@@ -87,7 +93,7 @@ ax_inset = ax.inset_axes(INSET_POS, transform=ax.transAxes,
 
 cs_inset = ax_inset.contourf(
     field_crop.longitude, field_crop.latitude, field_crop.values,
-    levels=levels, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(),
+    levels=levels, cmap=cmap, norm=norm, extend='both', transform=ccrs.PlateCarree(),
 )
 clip_contours_by_map(cs_inset, china_full, ax=ax_inset)
 draw_maps(china_full, ax=ax_inset, color='#333333', linewidth=0.5)
@@ -105,5 +111,5 @@ ax_inset.text(0.5, -0.10, 'South China Sea',
               ha='center', va='top', fontsize=8, color='#444444')
 
 # ── 7. Save ──
-plt.savefig('output.png', dpi=300, bbox_inches='tight', facecolor='white')
-plt.close()
+fig.savefig('output.png', dpi=120, facecolor='white')
+plt.close(fig)

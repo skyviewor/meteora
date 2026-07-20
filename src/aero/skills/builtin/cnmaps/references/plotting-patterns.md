@@ -160,15 +160,23 @@ cs = ax.contourf(lons, lats, data, transform=ccrs.PlateCarree())
 
 clip_contours_by_map(cs, china, ax=ax)
 draw_map(china, ax=ax, color="black", linewidth=1.0)
-fig.savefig("china-clipped.eps", bbox_inches="tight")
+fig.savefig("china-clipped.eps")
 ```
 
 ## Clip A Contourf Map On Multiple Axes
+
+This is an **API demonstration**, not a finished scientific comparison template:
+the two panels below use different variables and therefore must not share a
+colorbar. For a real same-variable multi-panel meteorological figure, use one
+shared `levels`/`cmap`/`norm`, pass `extend="both"` to every `contourf`, add a
+light dashed grid to every panel, show tick labels only on outer axes, and add a
+scientifically labeled colorbar outside the panel grid.
 
 ```python
 import numpy as np
 import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
+from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cnmaps import clip_contours_by_map, draw_map, get_adm_maps
 from cnmaps.sample import load_dem, load_temp
 
@@ -179,6 +187,7 @@ extent = beijing.get_extent(buffer=0.15)
 
 fig, axes = plt.subplots(
     1, 2, figsize=(10, 4.6),
+    layout="constrained",
     subplot_kw={"projection": ccrs.PlateCarree()},
 )
 
@@ -187,13 +196,25 @@ panels = [
     ("Beijing Temperature", temp_lons, temp_lats, temp, plt.cm.coolwarm, np.linspace(-20, 36, 10)),
 ]
 
-for ax, (title, lons, lats, data, cmap, levels) in zip(axes, panels):
-    cs = ax.contourf(lons, lats, data, levels=levels, cmap=cmap, transform=ccrs.PlateCarree())
+lon_ticks = np.arange(116.0, 117.1, 0.2)
+lat_ticks = np.arange(39.5, 40.6, 0.2)
+for index, (ax, (title, lons, lats, data, cmap, levels)) in enumerate(zip(axes, panels)):
+    cs = ax.contourf(
+        lons, lats, data, levels=levels, cmap=cmap,
+        extend="both", transform=ccrs.PlateCarree(),
+    )
     clip_contours_by_map(cs, beijing, extent=extent, set_extent=True)
     draw_map(beijing, ax=ax, color="black", linewidth=1.0)
     ax.set_title(title)
+    ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())
+    ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())
+    ax.xaxis.set_major_formatter(LongitudeFormatter(number_format=".1f"))
+    ax.yaxis.set_major_formatter(LatitudeFormatter(number_format=".1f"))
+    ax.tick_params(axis="x", labelsize=7)
+    ax.tick_params(axis="y", labelleft=(index == 0), labelsize=7)
+    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, draw_labels=False,
+                 linestyle="--", linewidth=0.3, color="grey", alpha=0.4)
 
-plt.tight_layout()
 plt.show()
 ```
 

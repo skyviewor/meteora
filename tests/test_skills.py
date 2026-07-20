@@ -1,6 +1,8 @@
 from pathlib import Path
 
+from aero.agent.loop import _skill_selection_text
 from aero.agent.skills import SkillLoader, SkillSelector, render_skill_context
+from aero.core.types import Message
 
 
 def _write_skill(
@@ -65,6 +67,22 @@ def test_skill_selector_matches_plotting_requests(tmp_path):
     assert [item.skill.name for item in selected] == ["scientific-plotting"]
 
 
+def test_skill_selector_always_activates_plotting_skill_for_a_drawing_verb(tmp_path):
+    builtin = tmp_path / "builtin"
+    _write_skill(builtin, "scientific-plotting", "Scientific plotting workflow.")
+    _write_skill(builtin, "literature-review", "Use this skill for literature review.")
+    selector = SkillSelector(
+        SkillLoader(builtin_dir=builtin, project_dir=tmp_path / "project")
+    )
+
+    assert [item.skill.name for item in selector.select("改画一张 3x3 的图")] == [
+        "scientific-plotting"
+    ]
+    assert [item.skill.name for item in selector.select("画")] == [
+        "scientific-plotting"
+    ]
+
+
 def test_skill_selector_matches_chinese_plotting_requests_from_skill_body(tmp_path):
     builtin = tmp_path / "builtin"
     _write_skill(
@@ -104,6 +122,25 @@ def test_skill_selector_adds_cnmaps_for_china_map_requests(tmp_path):
     selected = selector.select("帮我画一张中国区域降水图")
 
     assert [item.skill.name for item in selected] == ["scientific-plotting", "cnmaps"]
+
+
+def test_follow_up_plot_request_inherits_recent_user_context_for_skill_selection():
+    history = [
+        Message(role="system", content="system"),
+        Message(role="user", content="中国地区气温，画一个 2x2 的图，共享同一个 colorbar"),
+        Message(role="assistant", content="已完成。"),
+    ]
+
+    selection_text = _skill_selection_text("改画一张 3x3 的图", history)
+    selected = SkillSelector().select(selection_text)
+
+    assert [item.skill.name for item in selected] == ["scientific-plotting", "cnmaps"]
+
+
+def test_non_referential_message_does_not_inherit_old_skill_context():
+    history = [Message(role="user", content="中国地区气温，画一个 2x2 的图")]
+
+    assert _skill_selection_text("你好", history) == "你好"
 
 
 def test_skill_context_mentions_references_without_loading_them(tmp_path):

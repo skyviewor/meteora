@@ -55,16 +55,18 @@ cmap_colors = [
     '#8b0000', '#4a0000', '#1a0000',
 ]
 cmap = mcolors.ListedColormap(cmap_colors)
-norm = mcolors.BoundaryNorm(levels, cmap.N, extend='max')
+norm = mcolors.BoundaryNorm(levels, cmap.N, extend='both')
 cb_ticks = [0, 10, 50, 100, 200, 400, 600, 800]
 
 # ── 4. Figure & main map ──
-fig = plt.figure(figsize=(10, 8), facecolor='white')
-ax = fig.add_axes([0.06, 0.10, 0.68, 0.82], projection=proj)
+fig, ax = plt.subplots(
+    figsize=(8, 5.4), layout='constrained', facecolor='white',
+    subplot_kw={'projection': proj},
+)
 
 cs = ax.contourf(
     field_crop.longitude, field_crop.latitude, field_crop.values,
-    levels=levels, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(),
+    levels=levels, cmap=cmap, norm=norm, extend='both', transform=ccrs.PlateCarree(),
 )
 clip_contours_by_map(cs, china_mainland, ax=ax)
 draw_map(china_mainland, ax=ax, color='#333333', linewidth=0.8)
@@ -74,7 +76,7 @@ ax.set_title('Your Title Here', fontsize=14, fontweight='bold', pad=8)
 
 # ── 5. Gridlines (Lambert: force labels to border, no rotation) ──
 gl = ax.gridlines(
-    draw_labels=True, linewidth=0.3, color='gray', alpha=0.35,
+    draw_labels=True, linewidth=0.3, color='gray', alpha=0.35, linestyle='--',
     xlocs=np.arange(80, 131, 10), ylocs=np.arange(20, 51, 10),
     crs=ccrs.PlateCarree(), rotate_labels=False,
 )
@@ -87,7 +89,7 @@ gl.ylabel_style = {'size': 8}
 
 # ── 6. Colorbar ──
 cbar = fig.colorbar(cs, ax=ax, ticks=cb_ticks, fraction=0.022, pad=0.03)
-cbar.set_label('mm', fontsize=10, labelpad=6)
+cbar.ax.set_title('mm', fontsize=10, pad=5)
 cbar.ax.tick_params(labelsize=8, length=2, pad=2)
 
 # ── 7. SCS inset: bottom-right ──
@@ -98,7 +100,7 @@ ax_inset = ax.inset_axes(INSET_POS, transform=ax.transAxes, projection=proj)
 
 cs_inset = ax_inset.contourf(
     field_crop.longitude, field_crop.latitude, field_crop.values,
-    levels=levels, cmap=cmap, norm=norm, transform=ccrs.PlateCarree(),
+    levels=levels, cmap=cmap, norm=norm, extend='both', transform=ccrs.PlateCarree(),
 )
 clip_contours_by_map(cs_inset, china_full, ax=ax_inset)
 draw_maps(china_full, ax=ax_inset, color='#333333', linewidth=0.5)
@@ -115,5 +117,5 @@ ax_inset.text(0.5, -0.10, '南海诸岛', transform=ax_inset.transAxes,
               ha='center', va='top', fontsize=8, color='#444444')
 
 # ── 8. Save ──
-plt.savefig('output.png', dpi=300, bbox_inches='tight', facecolor='white')
-plt.close()
+fig.savefig('output.png', dpi=120, facecolor='white')
+plt.close(fig)

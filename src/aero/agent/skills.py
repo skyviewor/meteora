@@ -85,6 +85,15 @@ class SkillSelector:
             if score > 0:
                 selected.append(SelectedSkill(skill=skill, score=score))
 
+        # Drawing verbs are explicit user intent, not a fuzzy keyword match.
+        # In particular, a short continuation like “改画成 3×3” must always
+        # load the plotting workflow even when it contains no domain nouns.
+        if _is_plotting_request(normalized):
+            sciplot = next((skill for skill in skills if skill.name == "scientific-plotting"), None)
+            if sciplot is not None:
+                selected = [item for item in selected if item.skill.name != "scientific-plotting"]
+                selected.append(SelectedSkill(skill=sciplot, score=10_000))
+
         selected.sort(key=lambda item: (-item.score, item.skill.name))
         selected = selected[: self.max_selected]
         return _expand_related_skills(skills, selected, normalized, self.max_selected)
@@ -299,6 +308,17 @@ def _is_china_map_request(normalized_text: str) -> bool:
     )
     return any(term in normalized_text for term in china_terms) and any(
         term in normalized_text for term in map_terms
+    )
+
+
+def _is_plotting_request(normalized_text: str) -> bool:
+    """Return whether the current turn explicitly asks to create a figure."""
+    return any(
+        marker in normalized_text
+        for marker in (
+            "画", "绘", "作图", "制图", "图表", "子图",
+            "plot", "chart", "figure", "visualiz", "subplot", "panel",
+        )
     )
 
 

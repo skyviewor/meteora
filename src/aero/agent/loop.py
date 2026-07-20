@@ -30,6 +30,15 @@ logger = structlog.get_logger()
 
 _MAX_VISION_ANALYSES_PER_TURN = 2
 
+# A short follow-up such as “改成 3×3” has no domain keywords by itself, even
+# though its meaning depends entirely on the previous plotting request.  Keep
+# skill selection grounded in recent *user* intent for those referential turns.
+_SKILL_FOLLOW_UP_MARKERS = (
+    "改画", "改成", "重新画", "再画", "重画", "上一张", "刚才", "这张图", "这个图",
+    "上述图", "多子图", "子图", "3x3", "2x2", "3×3", "2×2", "subplot", "panel",
+    "same plot", "previous plot", "redraw",
+)
+
 
 def _image_fingerprint(path: Path) -> tuple[int, int] | None:
     """Return a cheap source-image version marker without reading its contents."""
@@ -937,6 +946,25 @@ def _ensure_cnmaps_when_sciplot_active(
         selected.append(SelectedSkill(skill=cnmaps, score=100))
 
 
+def _skill_selection_text(user_message: str, messages: list[Message]) -> str:
+    """Add recent user intent only for an explicitly referential follow-up."""
+    normalized = str(user_message or "").lower()
+    if not any(marker in normalized for marker in _SKILL_FOLLOW_UP_MARKERS):
+        return user_message
+
+    recent_user_messages: list[str] = []
+    for message in reversed(messages):
+        if message.role != "user" or not message.content.strip():
+            continue
+        recent_user_messages.append(message.content)
+        if len(recent_user_messages) == 3:
+            break
+
+    if not recent_user_messages:
+        return user_message
+    return "\n".join([*reversed(recent_user_messages), user_message])
+
+
 def _active_experiment_context() -> str:
     """Describe the active experiment without exposing storage internals."""
     try:
@@ -1027,7 +1055,8 @@ class AgentLoop:
         self.messages[0] = Message(role="system", content=system)
 
     def _refresh_system_prompt_for_turn(self, user_message: str) -> None:
-        selected = self.skill_selector.select(user_message)
+        selection_text = _skill_selection_text(user_message, self.messages)
+        selected = self.skill_selector.select(selection_text)
         _ensure_cnmaps_when_sciplot_active(selected, skill_selector=self.skill_selector)
         skill_context = render_skill_context(selected)
         from aero.data.instructions import load_instructions
