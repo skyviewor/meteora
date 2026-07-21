@@ -474,6 +474,45 @@ async def test_run_shell_allows_python_inside_aero_agent(monkeypatch, tmp_path):
     assert result["stdout"] == "ok"
 
 
+def test_multi_panel_cartopy_plot_validation_requires_extend_and_grid_locations(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_bad.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(3, 3, subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf(lon, lat, field, levels=levels)\n"
+        "    ax.gridlines(draw_labels=False)\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert result["scientific_plot_validation_failed"] is True
+    assert len(result["violations"]) == 3
+
+
+def test_multi_panel_cartopy_plot_validation_accepts_complete_pattern(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_good.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(3, 3, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
+        "    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, linestyle='--')\n",
+        encoding="utf-8",
+    )
+
+    assert _scientific_plot_script_error(f"python {script}", str(tmp_path)) is None
+
+
 @pytest.mark.asyncio
 async def test_run_shell_truncates_install_output_more_aggressively(
     monkeypatch, tmp_path

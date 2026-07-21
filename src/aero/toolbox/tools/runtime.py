@@ -286,6 +286,9 @@ async def run_shell(
     python_error = _python_runtime_error(command, env)
     if python_error:
         return python_error
+    plotting_error = _scientific_plot_script_error(command, workdir)
+    if plotting_error:
+        return plotting_error
     managed_tools = manager.managed_tools_in_command(command)
     if managed_tools:
         ready, missing, verified = manager.tools_ready(managed_tools, env)
@@ -348,6 +351,81 @@ async def run_shell(
         or result.stderr_bytes > len(stderr.encode(errors="replace")),
         "duration_ms": result.duration_ms,
     }
+
+
+def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
+    """Block known-incomplete Cartopy multi-panel plotting scripts before run.
+
+    Skills guide model behaviour, but a generated source file is the last safe
+    point to stop a visually incomplete scientific figure from being exported.
+    This intentionally checks only a narrow, unambiguous pattern: a local
+    Python script containing Cartopy, contourf, and a multi-panel axes loop.
+    """
+    try:
+        command_parts = shlex.split(command)
+    except ValueError:
+        return None
+
+    python_indices = [
+        index
+        for index, part in enumerate(command_parts[:-1])
+        if Path(part).name in {"python", "python3"}
+    ]
+    for index in python_indices:
+        candidate = command_parts[index + 1]
+        if candidate.startswith("-") or not candidate.endswith(".py"):
+            continue
+        script_path = Path(candidate)
+        if not script_path.is_absolute():
+            script_path = Path(workdir) / script_path
+        if not script_path.is_file():
+            continue
+        try:
+            source = script_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+        is_cartopy_contour_map = "cartopy" in source and "contourf(" in source
+        is_multi_panel = "axes.flat" in source or re.search(
+            r"plt\.subplots\s*\(\s*[^,]+\s*,\s*[^,]+",
+            source,
+        )
+        if not (is_cartopy_contour_map and is_multi_panel):
+            continue
+
+        violations = []
+        if not re.search(r"extend\s*=\s*['\"]both['\"]", source):
+            violations.append("每个有限 levels 的 contourf 必须显式使用 extend='both'")
+        if not re.search(r"layout\s*=\s*['\"]compressed['\"]", source):
+            violations.append(
+                "固定比例 Cartopy 多子图必须使用 layout='compressed'，"
+                "不能用 constrained layout 假装缩小子图间距"
+            )
+        if not re.search(r"\.gridlines\s*\(", source):
+            violations.append("每个面板必须绘制轻量虚线经纬网")
+        elif not all(
+            re.search(pattern, source)
+            for pattern in (
+                r"linestyle\s*=\s*['\"]--['\"]",
+                r"xlocs\s*=",
+                r"ylocs\s*=",
+            )
+        ):
+            violations.append("经纬网必须指定 xlocs/ylocs，并使用 linestyle='--'")
+
+        if violations:
+            return {
+                "status": "error",
+                "scientific_plot_validation_failed": True,
+                "message": (
+                    "多子图 Cartopy 科学绘图脚本未通过执行前检查："
+                    + "；".join(violations)
+                    + "。请先编辑脚本并重新执行，不能交付不完整的图。"
+                ),
+                "script_path": str(script_path),
+                "violations": violations,
+            }
+    return None
 
 
 def _covered_download_code_shell_error(command: str) -> dict | None:

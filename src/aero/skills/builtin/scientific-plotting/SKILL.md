@@ -205,6 +205,21 @@ export, and increase the minimum canvas width or reduce tick density if labels
 overlap. Do not restore a wide square canvas just to avoid calculating the map
 aspect; it reintroduces the original empty-space problem.
 
+For a fixed-aspect Cartopy multi-panel map, do **not** expect
+`layout="constrained"` plus `fig.get_layout_engine().set(wspace=..., hspace=...)`
+to force the visible gaps to those percentages. Constrained layout treats them
+as lower bounds, then the map aspect, titles, ticks, and colorbar may expand the
+gaps again. Use `layout="compressed"`; only then apply modest spacing preferences
+if needed:
+
+```python
+fig.get_layout_engine().set(wspace=0.02, hspace=0.04)
+```
+
+Treat these as preferences, not exact visual percentages. Re-open the exported
+PNG to verify the visible gap; never claim an exact gap reduction without that
+check.
+
 ## Multi-panel China comparison maps
 
 For a China map with two or more comparable panels (for example different times
@@ -224,7 +239,7 @@ than treating the first panel as the only complete map:
   mainland polygon, but render each inset with the full China polygon collection
   so South China Sea islands are not lost. Do **not** add a South China Sea inset
   to a provincial, city, or other regional map such as Shaanxi.
-- Use `layout="constrained"` for the panel grid and one external shared
+- Use `layout="compressed"` for the fixed-aspect panel grid and one external shared
   colorbar; do not add a separate colorbar for each panel.
 
 ```python
