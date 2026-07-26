@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from aero.core.config import AeroConfig
 from aero.core.llm_providers import (
     BUILTIN_LLM_PROVIDERS,
+    MODEL_METADATA,
     get_provider_preset,
     model_alias_for_provider,
     model_summary,
@@ -263,9 +264,12 @@ def test_config_missing_file():
 
 
 def test_llm_provider_presets():
+    from aero.data.vision_models import VISION_MODELS
+
     assert normalize_provider_id("阿里云百炼") == "bailian"
     assert normalize_provider_id("qwen3.7") == "bailian"
     assert "siliconflow" not in BUILTIN_LLM_PROVIDERS
+    assert list(BUILTIN_LLM_PROVIDERS)[:2] == ["bailian", "deepseek"]
     assert model_alias_for_provider("qwen3.7") == ("bailian", "qwen3.7-plus")
     preset = get_provider_preset("kimi")
     assert preset is not None
@@ -278,7 +282,14 @@ def test_llm_provider_presets():
         )
     assert model_summary("bailian", "qwen3.7-plus").startswith("多模态")
     assert model_supports_vision("bailian", "qwen3.7-plus") is True
+    assert model_supports_vision("bailian", "qwen3.7-flash") is True
     assert model_supports_vision("bailian", "qwen3.7-max") is False
+    assert "qwen3.7-flash" in dict(VISION_MODELS)
+    assert {model for model, _ in VISION_MODELS} == {
+        model
+        for (provider, model), metadata in MODEL_METADATA.items()
+        if provider == "bailian" and metadata.supports_vision
+    }
 
 
 def test_active_model_capabilities_refresh_when_switching_provider_profile():
@@ -459,6 +470,134 @@ def test_check_earthdata_config_uses_current_profile_labels(tmp_path, monkeypatc
     assert "Create Token" not in result["message"]
 
 
+def test_check_web_search_config_explains_both_provider_flows(
+    tmp_path, monkeypatch
+):
+    from aero.toolbox.builtin_tools import check_web_search_config
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    config.web_search.provider = "bailian"
+    config.save(tmp_path / "aero.yaml")
+    monkeypatch.chdir(tmp_path)
+
+    result = check_web_search_config()
+
+    assert result["provider"] == "bailian"
+    assert result["api_key_configured"] is False
+    assert "阿里云百炼 WebSearch MCP" in result["message"]
+    assert "智谱 AI 搜索" in result["message"]
+    assert "立即开通" in result["message"]
+    assert "确认开通" in result["message"]
+    assert "两项缺一不可" in result["message"]
+    assert "无需开通百炼 MCP" in result["message"]
+    assert "/websearch provider" in result["message"]
+    assert "前 2000 次调用免费" in result["message"]
+    assert "29 元/千次" in result["message"]
+    assert "search_std 0.01 元/次" in result["message"]
+    assert "完整展示“阿里云百炼”和“智谱 AI”两条方案" in result["message"]
+    assert result["providers"][0]["pricing"] == {
+        "free_calls": 2000,
+        "price_cny_per_1000_calls_after_free_quota": 29,
+        "note": "价格可能调整，以阿里云官方计费页面为准",
+        "url": "https://help.aliyun.com/zh/model-studio/web-search-mcp",
+    }
+    assert result["providers"][1]["pricing"]["search_std_cny_per_call"] == 0.01
+    assert result["references"] == [
+        "https://help.aliyun.com/zh/model-studio/web-search-mcp",
+        "https://docs.bigmodel.cn/cn/guide/tools/web-search",
+    ]
+    assert {provider["id"] for provider in result["providers"]} == {
+        "bailian",
+        "zhipu",
+    }
+
+
+def test_web_search_config_offers_explicit_bailian_key_reuse(
+    tmp_path, monkeypatch
+):
+    from aero.core.config import save_llm_profile
+    from aero.toolbox.builtin_tools import (
+        authorize_web_search_key_reuse,
+        check_web_search_config,
+    )
+
+    secrets_path = tmp_path / "secrets.yaml"
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+    config_path = tmp_path / "aero.yaml"
+    AeroConfig.create_default().save(config_path)
+    save_llm_profile(
+        "bailian",
+        "sk-bailian-existing",
+        "qwen3.7-plus",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    checked = check_web_search_config()
+
+    assert checked["reuse_available"]["bailian"] is True
+    assert checked["configuration_state"] == "reusable_key_available"
+    assert checked["dedicated_web_search_key_configured"] is False
+    assert checked["reusable_model_api_key_detected"] is True
+    assert checked["message"].startswith("已检测到可复用的模型 API Key")
+    assert "可以复用，无需重新创建或输入" in checked["message"]
+    assert "明确授权复用现有百炼 API Key" in checked["message"]
+    assert "仍需到百炼 MCP 广场开通" in checked["message"]
+    assert "不能隐藏智谱方案" in checked["message"]
+    assert "sk-bailian-existing" not in repr(checked)
+
+    reused = authorize_web_search_key_reuse("bailian")
+
+    assert reused["status"] == "success"
+    assert reused["credential_reused"] is True
+    assert reused["mcp_verified"] is False
+    assert "无需重新输入 Key" in reused["action_required"]
+    assert "立即开通" in reused["action_required"]
+    assert "sk-bailian-existing" not in repr(reused)
+    assert "sk-bailian-existing" not in config_path.read_text()
+    assert "sk-bailian-existing" in secrets_path.read_text()
+
+
+@pytest.mark.parametrize("historical_provider", ["dashscope", "aliyun", "qwen"])
+def test_web_search_config_recognizes_historical_bailian_provider_aliases(
+    tmp_path, monkeypatch, historical_provider
+):
+    from aero.toolbox.builtin_tools import check_web_search_config
+
+    secrets_path = tmp_path / "secrets.yaml"
+    secrets_path.write_text(
+        yaml.dump(
+            {
+                "llm": {
+                    "active_provider": historical_provider,
+                    "providers": {
+                        historical_provider: {
+                            "api_key": "sk-historical-bailian",
+                            "model": "qwen3.7-plus",
+                            "base_url": (
+                                "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                            ),
+                        }
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(secrets_path))
+    AeroConfig.create_default().save(tmp_path / "aero.yaml")
+    monkeypatch.chdir(tmp_path)
+
+    result = check_web_search_config()
+
+    assert result["reuse_available"]["bailian"] is True
+    assert result["configuration_state"] == "reusable_key_available"
+    assert "sk-historical-bailian" not in repr(result)
+    loaded = AeroConfig.load(tmp_path / "aero.yaml")
+    assert loaded.llm.provider == "bailian"
+    assert loaded.llm.providers["bailian"].api_key == "sk-historical-bailian"
+
+
 def test_vision_can_reuse_a_multimodal_primary_model(tmp_path, monkeypatch):
     from aero.core.config import resolved_vision_config, vision_is_configured
 
@@ -476,6 +615,77 @@ def test_vision_can_reuse_a_multimodal_primary_model(tmp_path, monkeypatch):
     assert resolved.provider == "openai"
     assert resolved.model == "gpt-4o"
     assert resolved.api_key == "sk-primary"
+
+
+def test_reused_vision_snapshot_survives_text_model_switch(tmp_path, monkeypatch):
+    from aero.core.config import resolved_vision_config, vision_is_configured
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    bailian = config.llm.provider_config("bailian")
+    bailian.api_key = "sk-bailian"
+    bailian.model = "qwen3.7-plus"
+    bailian.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    config.vision.mode = "reuse_primary"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen3.7-plus"
+    config.vision.base_url = bailian.base_url
+
+    config.llm.provider = "deepseek"
+    config.llm.model = "deepseek-v4-flash"
+    config.llm.supports_vision = False
+    config.llm.set_active_api_key("sk-deepseek")
+
+    assert vision_is_configured(config) is True
+    resolved = resolved_vision_config(config)
+    assert resolved is not None
+    assert resolved.provider == "bailian"
+    assert resolved.model == "qwen3.7-plus"
+    assert resolved.api_key == "sk-bailian"
+
+
+def test_reuse_profile_drops_a_stale_dedicated_vision_key(tmp_path, monkeypatch):
+    from aero.core.config import load_user_secrets, save_vision_api_key, save_vision_profile
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    save_vision_api_key("sk-dedicated", provider="bailian", model="qwen3.7-plus")
+    save_vision_profile(
+        "reuse_primary",
+        provider="bailian",
+        model="qwen3.7-plus",
+    )
+
+    assert "api_key" not in load_user_secrets()["vision"]
+
+
+def test_global_vision_profile_survives_a_fresh_project_config(tmp_path, monkeypatch):
+    from aero.core.config import (
+        resolved_vision_config,
+        save_vision_profile,
+        vision_is_configured,
+    )
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    save_vision_profile(
+        "separate",
+        provider="bailian",
+        model="qwen3.7-plus",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    config = AeroConfig.create_default()
+    bailian = config.llm.provider_config("bailian")
+    bailian.api_key = "sk-bailian"
+    bailian.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    assert config.vision.mode == "separate"
+    assert config.vision.provider == "bailian"
+    assert config.vision.model == "qwen3.7-plus"
+    assert vision_is_configured(config) is True
+    resolved = resolved_vision_config(config)
+    assert resolved is not None
+    assert resolved.model == "qwen3.7-plus"
+    assert resolved.api_key == "sk-bailian"
 
 
 def test_separate_vision_credentials_are_not_saved_to_project_config(tmp_path, monkeypatch):

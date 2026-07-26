@@ -42,6 +42,11 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Design at the final intended size, not just screen size. For a normal in-app result, prefer a compact, readable figure over a large source-resolution image.
    - Prefer vector output for line/cartographic figures when the requested deliverable supports it. For default raster output, use a modest canvas and DPI; do not choose high-DPI export merely as a publication-quality default.
    - Use readable fonts, line widths, labels, colorbar ticks, and panel labels.
+   - For scientific units with exponents or indices, use Matplotlib mathtext
+     (`$10^{-6}$`, `$m^2$`, `$kg^{-1}$`) rather than Unicode superscript
+     glyphs such as `⁻`, `¹`, `²`, or `⁶`. This avoids missing-glyph boxes in
+     CJK-capable display fonts. For example:
+     `cbar.set_label(r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)")`.
    - Read `references/publication-quality.md` before final export only when the user explicitly requests a paper, print, publication, high-resolution, or other large-format deliverable.
 
 7. Preserve reproducibility.
@@ -55,7 +60,7 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Default to a delivered raster figure no larger than **500 KB** (that is, `500 * 1024` bytes). This is a hard delivery limit unless the user explicitly asks for a high-definition, print, publication, or large-format figure.
    - Start with a compact canvas and raster DPI (normally no larger than about 7 × 5 inches and 120 DPI), a layout engine such as `layout="compressed"`/`layout="constrained"`, and minimal padding. Do not enlarge the canvas just to fill screen space or use `bbox_inches="tight"` as a substitute for layout.
    - After every default raster export, check the actual file size. If it exceeds 500 KB, regenerate it with a smaller canvas/DPI and, if still readable, apply lossless PNG optimization or a suitable compressed format. Repeat until it is within the limit while keeping labels, colorbars, and key scientific features legible.
-   - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop pixels to meet the limit, detect and trim “white space” programmatically, save only a colorbar axis, or remove the main map/data axes. For Cartopy maps or figures built with `fig.add_axes`, do not use `bbox_inches="tight"` unless the saved result has been visually verified.
+   - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop pixels to meet the limit, detect and trim “white space” programmatically, save only a colorbar axis, or remove the main map/data axes. **Never use `bbox_inches="tight"` for a Cartopy map**, even when one exported image appears correct: Cartopy transforms, colorbars, and inset axes can produce an incomplete tight bounding box. Use `layout="compressed"`, a proportionate `figsize`, and colorbar padding instead.
    - Before reporting a figure, visually inspect the exported file (not only the plotting window) and verify that it includes the primary data panel, title/metadata where applicable, and colorbar/legend. If the exported dimensions or aspect ratio are implausible for the requested figure, treat it as a failed export and regenerate it rather than delivering it.
    - Treat a user request for "高清", "高分辨率", "大图", "出版", "印刷", "publication", "print", or an explicit pixel/DPI target as the only exception to the 500 KB default. State the resulting file size when using that exception.
    - When reporting a generated image, use Markdown image syntax such as `![description](figures/name.png)`.
@@ -168,42 +173,102 @@ the requested sides with a layout-aware margin.
 
 Do not give every regional map a square panel. A narrow/tall province (for
 example Shaanxi) placed in a wide square grid wastes most of every axes; a wide
-national map has the inverse problem. For `PlateCarree`, estimate the map's
-rendered aspect from its extent, then derive the Figure size from that aspect and
-the panel grid:
+national map has the inverse problem. For `PlateCarree`, derive the Figure size
+from the extent, panel grid, and the actual title/colorbar reservations. Do not
+blindly change `figsize`, `pad`, or `panel_height` and claim that whitespace is
+reduced: use this calculation first.
 
 ```python
 import numpy as np
 
-def aspect_aware_grid_size(extent, nrows, ncols, panel_height=2.45):
+def compact_platecarree_grid_size(
+    extent, nrows, ncols, *, panel_height=2.4,
+    has_suptitle=True, shared_horizontal_colorbar=True,
+):
     west, east, south, north = extent
     # Longitude is shorter in rendered distance away from the equator.
     map_aspect = (
         (east - west) * np.cos(np.deg2rad((south + north) / 2))
         / (north - south)
     )
-    width = np.clip(ncols * panel_height * map_aspect + 0.60, 4.8, 11.0)
-    height = nrows * panel_height + 1.00  # title + shared horizontal colorbar
+    # Reserve only the components that are actually drawn; this controls the
+    # figure's outer top/bottom whitespace without relying on tight-bbox export.
+    title_reserve = 0.24 if has_suptitle else 0.05
+    colorbar_reserve = 0.30 if shared_horizontal_colorbar else 0.05
+    outer_reserve = 0.08
+    width = np.clip(ncols * panel_height * map_aspect + 0.35, 4.2, 11.0)
+    height = nrows * panel_height + title_reserve + colorbar_reserve + outer_reserve
     return float(width), float(height)
 
-figsize = aspect_aware_grid_size(extent, nrows=3, ncols=3)
+figsize = compact_platecarree_grid_size(
+    extent, nrows=3, ncols=3,
+    has_suptitle=True, shared_horizontal_colorbar=True,
+)
 fig, axes = plt.subplots(
     3, 3, figsize=figsize, layout="compressed",
     subplot_kw={"projection": ccrs.PlateCarree()},
 )
 ```
 
+When a multi-panel figure has both `fig.suptitle(...)` and per-panel
+`ax.set_title(...)`, use this export guard immediately after adding the
+suptitle and before `savefig`. It measures the actual rendered text boxes and
+increases only the Figure height when the top-row title would collide with the
+suptitle:
+
+```python
+def ensure_suptitle_clearance(fig, axes, min_gap_px=8, max_passes=4):
+    suptitle = fig._suptitle
+    if suptitle is None:
+        return
+    for _ in range(max_passes):
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+        suptitle_bottom = suptitle.get_window_extent(renderer).y0
+        panel_title_top = max(
+            ax.title.get_window_extent(renderer).y1
+            for ax in np.ravel(axes) if ax.title.get_text()
+        )
+        gap = suptitle_bottom - panel_title_top
+        if gap >= min_gap_px:
+            return
+        width, height = fig.get_size_inches()
+        fig.set_size_inches(width, height + (min_gap_px - gap) / fig.dpi + 0.08)
+    raise RuntimeError("总标题与子图标题仍然重叠；请增加标题预留高度")
+
+fig.suptitle("…")
+ensure_suptitle_clearance(fig, axes)
+fig.savefig("figures/map.png", dpi=120, facecolor="white")
+```
+
+Never set the title/colorbar reservation to zero merely to reduce whitespace.
+The guard is a required final check for this title combination; if it raises,
+increase the compact-layout reservation rather than deleting titles or using
+`bbox_inches="tight"`.
+
+Set `extent` from the study boundary's bounds plus modest geographic padding
+(normally 3–6% of longitude and latitude spans) before calling this function;
+do not keep a previous province/country extent when the target region changes.
 Use `layout="compressed"` with this pattern: it removes unused layout space
 around fixed-aspect GeoAxes without cropping pixels. Then make geographic tick
 density match each panel's available width/height. Use a 1/2/2.5/5 × 10^n
-“nice” step, targeting at most about four longitude intervals and six latitude
+"nice" step, targeting at most about four longitude intervals and six latitude
 intervals for a compact 3×3 grid. Do not retain dense half-degree labels merely
 because they fit a single-panel version of the same map.
 
+This automates **outer Figure margins**, not empty areas inside a geographic axes.
+An oblique/narrow shape such as Japan can legitimately leave blank corners inside
+its rectangular lon/lat extent. If that dominates the exported figure, explain
+the cause and offer a user-visible choice of a different projection/extent; do
+not distort coordinates, crop geographic content, or falsely report that a
+`pad` adjustment fixed it.
+
 This is an estimate, not a replacement for visual verification: inspect the
-export, and increase the minimum canvas width or reduce tick density if labels
-overlap. Do not restore a wide square canvas just to avoid calculating the map
-aspect; it reintroduces the original empty-space problem.
+export, compare its pixel dimensions and visible outer margins with the prior
+export, and report only a verified change. Increase the minimum canvas width or
+reduce tick density if labels overlap. Do not restore a wide square canvas just
+to avoid calculating the map aspect; it reintroduces the original empty-space
+problem.
 
 For a fixed-aspect Cartopy multi-panel map, do **not** expect
 `layout="constrained"` plus `fig.get_layout_engine().set(wspace=..., hspace=...)`
@@ -307,6 +372,7 @@ These rules must be followed without exception. They override convenience, aesth
 - **Finite contour levels**: When using `contourf` with an explicitly finite `levels` range, pass `extend="both"` by default so valid values below/above the selected display range use the end colors rather than becoming blank. The colorbar must show the corresponding end triangles. Do not use `extend` to conceal NaN/masked data: investigate and represent genuine missing data separately.
 - **Default file-size cap**: Unless the user explicitly requests high-definition, print, publication, large-format, or a specific high pixel/DPI output, do not deliver a raster figure above 500 KB. Verify the saved file size rather than estimating it from `figsize` or DPI.
 - **Figure-integrity check**: A colorbar, legend, title, or blank canvas alone is never a valid scientific figure. Before delivering an export, confirm that the primary data axes were saved and occupy a meaningful part of the image. Never trade away the data panel to satisfy the default file-size cap.
+- **Multi-panel title clearance**: If a multi-panel Figure has both a `suptitle` and per-panel titles, call `ensure_suptitle_clearance(fig, axes)` after setting the titles and before export. Never reduce its title/colorbar reservations to zero or deliver overlapping text.
 - Never use a diverging colormap for a strictly positive scalar field unless it encodes a meaningful threshold.
 - Never use a sequential colormap for an anomaly/bias field that needs positive/negative symmetry.
 - Never use dense wind arrows or dense significance dots that cover the actual meteorological field.

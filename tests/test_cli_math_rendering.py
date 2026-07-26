@@ -156,6 +156,36 @@ def test_runtime_tool_confirmation_message_is_human_readable():
     assert '"tools"' not in message
 
 
+def test_runtime_setup_shell_batch_confirmation_shows_raw_commands_without_json():
+    app = AeroApp.__new__(AeroApp)
+    app.config = AeroConfig.create_default()
+
+    message = AeroApp._build_confirm_message(
+        app,
+        "run_shell",
+        {},
+        [
+            {
+                "command": "mkdir -p ~/.aero/runtime/envs/aero-agent",
+                "description": "创建 Aero 运行环境目录",
+            },
+            {
+                "command": "ln -sfn ~/.aero/runtime/envs/aero-agent/bin ~/.aero/runtime/bin",
+                "description": "创建 Aero 运行环境链接",
+            },
+        ],
+    )
+
+    assert "初始化 Aero 私有运行环境" in message
+    assert "命令（2 条）" in message
+    assert "当前项目文件" in message
+    assert "aero runtime clean" in message
+    assert "mkdir -p ~/.aero/runtime/envs/aero-agent" in message
+    assert "ln -sfn ~/.aero/runtime/envs/aero-agent/bin ~/.aero/runtime/bin" in message
+    assert "参数" not in message
+    assert '"command"' not in message
+
+
 def test_render_status_lines_omits_activity_when_stopped():
     rendered = _render_status_lines(["继续执行...", "正在调用视觉模型分析图片"])
 
@@ -839,3 +869,4 @@ async def test_chat_input_uses_compact_editor_rows_without_vertical_inset(
         assert user_input.styles.padding.bottom == 0
         assert user_input.content_region.height == 2
         assert input_meta.region.height == 1
+        assert user_input.content_region.x == input_meta.content_region.x

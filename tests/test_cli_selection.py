@@ -51,3 +51,20 @@ def test_empty_text_selection_is_ignored():
     AeroApp.on_text_selected(app, SimpleNamespace(stop=lambda: None))
 
     assert copied == []
+
+
+def test_stale_text_selection_does_not_crash_the_app():
+    stopped = []
+    cleared = []
+    app = SimpleNamespace(
+        screen=SimpleNamespace(
+            get_selected_text=lambda: (_ for _ in ()).throw(IndexError("stale selection")),
+            clear_selection=lambda: cleared.append(True),
+        ),
+        _copy_text_to_clipboard=lambda text: (_ for _ in ()).throw(AssertionError(text)),
+    )
+
+    AeroApp.on_text_selected(app, SimpleNamespace(stop=lambda: stopped.append(True)))
+
+    assert stopped == [True]
+    assert cleared == [True]

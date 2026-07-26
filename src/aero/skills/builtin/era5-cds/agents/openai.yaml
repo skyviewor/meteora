@@ -1,0 +1,4 @@
+interface:
+  display_name: "ERA5 CDS"
+  short_description: "ERA5 CDS 数据下载、可用性判断和参数校验工作流。"
+  default_prompt: "Use $era5-cds to validate an ERA5 CDS request and diagnose availability errors accurately."

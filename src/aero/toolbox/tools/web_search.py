@@ -9,6 +9,8 @@ from aero.data.web_search import (
     search_bailian_web,
     search_zhipu_web,
 )
+from aero.core.config import resolved_vision_config
+from aero.core.llm_providers import normalize_provider_id
 from aero.toolbox.config_access import find_config
 from aero.toolbox.registry import register_tool
 
@@ -16,6 +18,20 @@ from aero.toolbox.registry import register_tool
 async def check_web_search_status() -> dict:
     """Check web-search availability without submitting a search query."""
     config = find_config()
+    from aero.data.web_search import bailian_native_search_supported
+    if (
+        config.web_search.enabled
+        and config.llm.provider == "bailian"
+        and bailian_native_search_supported(config.llm.model)
+    ):
+        return {
+            "available": True,
+            "native": True,
+            "api_key_configured": True,
+            "credential_reused": True,
+            "provider": "阿里云百炼模型内置联网搜索",
+            "message": "当前模型支持内置联网搜索，模型会在需要时自动调用。",
+        }
     provider = (config.web_search.provider or "bailian").strip().lower()
     if provider not in {"bailian", "zhipu"}:
         return {
@@ -27,6 +43,9 @@ async def check_web_search_status() -> dict:
         }
     api_key, credential_reused = _web_search_credential(config)
     if not api_key:
+        reusable_sources = _reusable_model_key_sources(config, provider)
+        if reusable_sources:
+            return _reuse_authorization_required(provider, reusable_sources)
         return {
             "available": False,
             "api_key_configured": False,
@@ -146,6 +165,7 @@ async def search_web(
 ) -> dict:
     """Search current web content using the configured Bailian credential."""
     config = find_config()
+
     provider = (config.web_search.provider or "bailian").strip().lower()
     if provider not in {"bailian", "zhipu"}:
         return {
@@ -157,6 +177,9 @@ async def search_web(
         }
     api_key, credential_reused = _web_search_credential(config)
     if not api_key:
+        reusable_sources = _reusable_model_key_sources(config, provider)
+        if reusable_sources:
+            return _reuse_authorization_required(provider, reusable_sources, search=True)
         return {
             "found": False,
             "api_key_configured": False,
@@ -209,6 +232,77 @@ def _web_search_credential(config) -> tuple[str, bool]:
     # that behaviour as a fallback while new setups store it separately.
     api_key = config.vision.api_key.strip()
     return api_key, bool(api_key)
+
+
+def _reusable_model_key_sources(config, provider: str) -> list[str]:
+    """Detect reusable provider credentials without returning their value.
+
+    A model API key is deliberately not used by web search until the user has
+    explicitly authorized that reuse.  Still reporting its presence here is
+    essential: otherwise the assistant falsely tells the user that no Bailian
+    key exists and sends them through an unnecessary key-creation flow.
+    """
+    provider = normalize_provider_id(provider)
+    sources: list[str] = []
+    for saved_provider, profile in config.llm.providers.items():
+        if normalize_provider_id(saved_provider) == provider and profile.api_key:
+            sources.append("主模型")
+            break
+    vision = resolved_vision_config(config)
+    if (
+        vision is not None
+        and normalize_provider_id(vision.provider) == provider
+        and vision.api_key
+        and "视觉模型" not in sources
+    ):
+        sources.append("视觉模型")
+    return sources
+
+
+def _reuse_authorization_required(
+    provider: str, sources: list[str], *, search: bool = False
+) -> dict:
+    """Describe an existing key that needs user authorization before reuse."""
+    provider_name = _provider_label(provider)
+    operation = "本次网页搜索" if search else "联网搜索"
+    result = {
+        "api_key_configured": False,
+        "dedicated_web_search_key_configured": False,
+        "reusable_model_api_key_detected": True,
+        "reuse_available": True,
+        "reuse_sources": sources,
+        "credential_reused": False,
+        "authorization_required": True,
+        "provider": provider_name,
+        "error": (
+            f"已检测到{provider_name}的{'、'.join(sources)} API Key；"
+            f"但尚未获得将它复用于{operation}的明确授权。"
+        ),
+        "message": (
+            f"已检测到可复用的{provider_name}模型 API Key，无需重新创建或输入。"
+            "必须同时向用户提供两条可选路径，而不是只推荐当前供应商：\n"
+            "1. 阿里云百炼（可复用现有 Key）：用户明确回复“同意复用百炼 API Key”后，"
+            "还需在百炼 MCP 广场开通 WebSearch/联网搜索（立即开通 → 确认开通），"
+            "并检查余额与调用额度。\n"
+            "2. 智谱 AI 搜索：用户也可以选择配置智谱 API Key；无需开通百炼 MCP，"
+            "但需检查智谱账户余额和搜索额度。\n"
+            "先让用户在“授权复用百炼”与“配置智谱”之间明确选择；"
+            "只有选择百炼且明确授权后，才能调用 authorize_web_search_key_reuse。"
+        ),
+        "action_required": (
+            "展示百炼与智谱两种完整方案并等待用户选择；"
+            "若用户选择百炼且明确授权复用，调用 authorize_web_search_key_reuse(provider='bailian')；"
+            "若用户选择智谱，说明获取 Key 的地址并等待其准备好后打开安全输入窗口。"
+        ),
+        "alternative_provider_available": "zhipu" if provider == "bailian" else "bailian",
+        "provider_options": ["bailian", "zhipu"],
+        "references": _provider_references(provider),
+    }
+    if search:
+        result["found"] = False
+    else:
+        result["available"] = False
+    return result
 
 
 def _provider_label(provider: str) -> str:

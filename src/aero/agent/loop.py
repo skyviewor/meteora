@@ -512,7 +512,11 @@ _TOOL_PROGRESS_MESSAGES = {
     "prepare_image_for_vision": ("正在压缩图片", "图片压缩完成", "图片压缩失败"),
     "configure_vision_model": ("正在配置视觉模型", "视觉模型配置完成", "视觉模型配置失败"),
     "search_literature": ("正在检索学术文献", "学术文献检索完成", "学术文献检索失败"),
-    "search_web": ("正在搜索互联网", "互联网搜索完成", "互联网搜索失败"),
+    "search_web": (
+        "正在调用外部网页搜索服务",
+        "外部网页搜索完成",
+        "外部网页搜索失败",
+    ),
     "save_literature": ("正在保存文献信息", "文献信息保存完成", "文献信息保存失败"),
     "download_literature_pdf": ("正在下载文献全文", "文献全文下载完成", "文献全文下载失败"),
     "list_literature": ("正在查看文献列表", "文献列表查看完成", "查看文献列表失败"),
@@ -625,6 +629,19 @@ def _tool_progress_message(tool_name: str, stage: str, args: dict | None = None)
 
 def _tool_result_has_error_status(result: object) -> bool:
     return isinstance(result, dict) and result.get("status") == "error"
+
+
+def _tool_error_progress_message(
+    tool_name: str, args: dict | None, result: object
+) -> str:
+    """Describe expected validation feedback without calling it a command failure."""
+    if (
+        tool_name == "run_shell"
+        and isinstance(result, dict)
+        and result.get("scientific_plot_validation_failed")
+    ):
+        return "绘图脚本检查未通过"
+    return _tool_progress_message(tool_name, "error", args)
 
 
 def _sanitize_user_facing_text(text: str) -> str:
@@ -1012,6 +1029,7 @@ class AgentLoop:
             reasoning_effort=config.llm.reasoning_effort,
             api_key=config.llm.active_api_key(),
             base_url=config.llm.base_url,
+            web_search_enabled=config.web_search.enabled,
         )
         self.llm = LLMClient(llm_cfg)
         self.runtime = Runtime()
@@ -1078,6 +1096,13 @@ class AgentLoop:
     def _allowed_tools(self) -> list[dict]:
         from aero.data.modes import filter_tool_functions
         tools = filter_tool_functions(self.registry.list_functions(), self.config.mode)
+        from aero.data.web_search import bailian_native_search_supported
+
+        native_search = (
+            self.config.web_search.enabled
+            and self.config.llm.provider == "bailian"
+            and bailian_native_search_supported(self.config.llm.model)
+        )
         allowed_destructive_memo_tools = _destructive_memo_tools_for_text(
             self._current_user_message
         )
@@ -1086,7 +1111,36 @@ class AgentLoop:
             for tool in tools
             if tool.get("function", {}).get("name")
             not in ({"delete_memo", "clear_memos"} - allowed_destructive_memo_tools)
+            and not (
+                tool.get("function", {}).get("name") == "search_web"
+                and (not self.config.web_search.enabled or native_search)
+            )
         ]
+
+    def _uses_bailian_native_web_search(self) -> bool:
+        """Whether this turn is delegated to Bailian's model-side search."""
+        from aero.data.web_search import bailian_native_search_supported
+
+        return bool(
+            self.config.web_search.enabled
+            and self.config.llm.provider == "bailian"
+            and bailian_native_search_supported(self.config.llm.model)
+        )
+
+    def _external_web_search_block_reason(self, tool_name: str) -> str | None:
+        """Keep native Bailian search from silently falling back to MCP.
+
+        Filtering the function definition from the request is necessary but not
+        sufficient: providers can still emit a stale/hallucinated tool call from
+        conversation context.  The runtime boundary must enforce the same rule
+        before any external credential or MCP service is touched.
+        """
+        if tool_name == "search_web" and self._uses_bailian_native_web_search():
+            return (
+                "当前已启用百炼模型内置联网搜索，已阻止外部网页搜索调用。"
+                "请直接使用模型内置搜索完成本轮回答，不要回退到 MCP。"
+            )
+        return None
 
     async def close(self):
         await self.llm.close()
@@ -1107,6 +1161,7 @@ class AgentLoop:
 
         try:
             text, tool_calls = await self.llm.chat_with_tools(self.messages, tools)
+            self._record_llm_references()
             self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
             debug_log(
                 "agent.llm_response",
@@ -1120,7 +1175,9 @@ class AgentLoop:
                 debug_log("agent.run_completed", mode="non_stream", response_length=len(response))
                 return response
 
-            visible_text = _sanitize_user_facing_text(text)
+            visible_text = _inject_refs_if_missing(
+                _sanitize_user_facing_text(text), self._ref_urls
+            )
             self.messages.append(Message(role="assistant", content=visible_text))
             debug_log(
                 "agent.run_completed",
@@ -1153,6 +1210,15 @@ class AgentLoop:
         self.messages.append(Message(role="user", content=user_message))
         tools = self._allowed_tools()
 
+        if self._uses_bailian_native_web_search():
+            yield StreamEvent(
+                type="status",
+                content=(
+                    f"已启用 {self.config.llm.model} 的模型内置联网搜索；"
+                    "模型会仅在需要实时信息时自行检索。"
+                ),
+            )
+
         try:
             accumulated_text = ""
             tool_calls: list[ToolCall] = []
@@ -1168,6 +1234,8 @@ class AgentLoop:
                 elif event.type == "tool_call":
                     tool_calls.append(event.tool_call)
                     debug_log("agent.stream_tool_call", tool_name=event.tool_call.name)
+                elif event.type == "references":
+                    self._record_reference_urls(event.references)
                 elif event.type == "done":
                     self.tracker.add_llm(event.usage, self.config.llm.model)
 
@@ -1184,6 +1252,11 @@ class AgentLoop:
                 ):
                     yield event
             else:
+                injected = _inject_refs_if_missing(accumulated_text, self._ref_urls)
+                if injected != accumulated_text:
+                    extra = injected[len(accumulated_text):]
+                    yield StreamEvent(type="text", content=extra)
+                    accumulated_text = injected
                 self.messages.append(Message(role="assistant", content=accumulated_text))
                 debug_log(
                     "agent.run_completed",
@@ -1235,6 +1308,14 @@ class AgentLoop:
     def _reset_turn_vision_guard(self) -> None:
         self._vision_analyses_this_turn = 0
         self._successful_vision_images.clear()
+
+    def _record_reference_urls(self, urls: list[str]) -> None:
+        for url in urls:
+            if isinstance(url, str) and _is_url(url) and url not in self._ref_urls:
+                self._ref_urls.append(url)
+
+    def _record_llm_references(self) -> None:
+        self._record_reference_urls(getattr(self.llm, "last_search_references", []))
 
     def _vision_analysis_block_reason(self, arguments: dict) -> str | None:
         """Prevent costly visual-analysis loops within one user request."""
@@ -1288,6 +1369,15 @@ class AgentLoop:
                 err = f"当前操作不可用：{_sanitize_user_facing_text(tool_name)}"
                 for tc in calls:
                     self.messages.append(Message(role="tool", content=err, tool_call_id=tc.id))
+                continue
+
+            native_search_block = self._external_web_search_block_reason(tool_name)
+            if native_search_block:
+                debug_log("agent.external_web_search_blocked", tool_name=tool_name)
+                for tc in calls:
+                    self.messages.append(
+                        Message(role="tool", content=native_search_block, tool_call_id=tc.id)
+                    )
                 continue
 
             reason = block_reason(tool_name, self.config.mode)
@@ -1356,6 +1446,7 @@ class AgentLoop:
             return response
 
         response = _sanitize_user_facing_text(await self.llm.chat(self.messages))
+        self._record_llm_references()
         self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
         response = _inject_refs_if_missing(response, self._ref_urls)
         self.messages.append(Message(role="assistant", content=response))
@@ -1414,6 +1505,8 @@ class AgentLoop:
                 elif event.type == "tool_call":
                     pending_calls.append(event.tool_call)
                     debug_log("agent.stream_followup_tool_call", tool_name=event.tool_call.name)
+                elif event.type == "references":
+                    self._record_reference_urls(event.references)
                 elif event.type == "done":
                     self.tracker.add_llm(event.usage, self.config.llm.model)
 
@@ -1488,6 +1581,15 @@ class AgentLoop:
                 for tc in calls:
                     yield StreamEvent(type="status", content=err)
                     self.messages.append(Message(role="tool", content=err, tool_call_id=tc.id))
+                continue
+
+            native_search_block = self._external_web_search_block_reason(tool_name)
+            if native_search_block:
+                debug_log("agent.external_web_search_blocked", tool_name=tool_name)
+                for tc in calls:
+                    self.messages.append(
+                        Message(role="tool", content=native_search_block, tool_call_id=tc.id)
+                    )
                 continue
 
             reason = block_reason(tool_name, self.config.mode)
@@ -1646,6 +1748,9 @@ class AgentLoop:
             debug_log("agent.tool_finished", tool_name=tc.name, success=True)
         elif exec_result.success:
             result_str = json.dumps(exec_result.result, ensure_ascii=False, default=str)
+            error_progress = _tool_error_progress_message(
+                tc.name, parsed_args, exec_result.result
+            )
             error_message = ""
             if isinstance(exec_result.result, dict):
                 error_message = str(
@@ -1665,11 +1770,11 @@ class AgentLoop:
                             ensure_ascii=False,
                         ),
                     )
-            if error_message.startswith(_tool_progress_message(tc.name, "error", parsed_args)):
+            if error_message.startswith(error_progress):
                 content = _sanitize_progress_text(error_message)
             else:
                 content = (
-                    f"{_tool_progress_message(tc.name, 'error', parsed_args)}："
+                    f"{error_progress}："
                     f"{_sanitize_progress_text(error_message)}"
                 )
             yield StreamEvent(
@@ -1717,6 +1822,7 @@ class AgentLoop:
         self.llm.config.model = model
         self.llm.config.base_url = base_url
         self.llm.config.api_key = self.config.llm.active_api_key()
+        self.llm.config.web_search_enabled = self.config.web_search.enabled
 
         # The raw API key is intentionally not included in the tool result sent to
         # the LLM. Reload it from the just-saved project config instead.
@@ -1854,7 +1960,7 @@ def _tool_start_message(tool_name: str) -> str:
         "list_figures": "正在查看图片列表...",
         "delete_file": "正在删除文件...",
         "search_literature": "正在检索学术文献...",
-        "search_web": "正在搜索互联网...",
+        "search_web": "正在调用外部网页搜索服务...",
         "save_literature": "正在保存文献信息...",
         "download_literature_pdf": "正在下载文献全文...",
         "list_literature": "正在查看已保存文献...",
@@ -1917,7 +2023,7 @@ def _tool_done_message(tool_name: str) -> str:
         "list_figures": "图片列表读取完成",
         "delete_file": "文件删除完成",
         "search_literature": "学术文献检索完成",
-        "search_web": "互联网搜索完成",
+        "search_web": "外部网页搜索完成",
         "save_literature": "文献信息保存完成",
         "download_literature_pdf": "文献全文下载完成",
         "list_literature": "已保存文献列表读取完成",
@@ -1980,7 +2086,7 @@ def _tool_error_prefix(tool_name: str) -> str:
         "list_figures": "图片列表读取失败",
         "delete_file": "文件删除失败",
         "search_literature": "学术文献检索失败",
-        "search_web": "互联网搜索失败",
+        "search_web": "外部网页搜索失败",
         "save_literature": "文献信息保存失败",
         "download_literature_pdf": "文献全文下载失败",
         "list_literature": "已保存文献列表读取失败",

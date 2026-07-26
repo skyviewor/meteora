@@ -495,6 +495,26 @@ def test_multi_panel_cartopy_plot_validation_requires_extend_and_grid_locations(
     assert len(result["violations"]) == 3
 
 
+def test_cartopy_plot_validation_rejects_tight_bbox(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_tight_bbox.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots(subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
+        "fig.savefig('map.png', bbox_inches='tight')\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert result["scientific_plot_validation_failed"] is True
+    assert "bbox_inches='tight'" in result["violations"][0]
+
+
 def test_multi_panel_cartopy_plot_validation_accepts_complete_pattern(tmp_path):
     from aero.toolbox.tools.runtime import _scientific_plot_script_error
 
@@ -511,6 +531,29 @@ def test_multi_panel_cartopy_plot_validation_accepts_complete_pattern(tmp_path):
     )
 
     assert _scientific_plot_script_error(f"python {script}", str(tmp_path)) is None
+
+
+def test_multi_panel_cartopy_plot_validation_requires_title_clearance_guard(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_titles.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(2, 2, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
+        "    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, linestyle='--')\n"
+        "    ax.set_title('panel')\n"
+        "fig.suptitle('whole figure')\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "ensure_suptitle_clearance" in result["violations"][0]
 
 
 @pytest.mark.asyncio

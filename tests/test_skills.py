@@ -67,6 +67,12 @@ def test_skill_selector_matches_plotting_requests(tmp_path):
     assert [item.skill.name for item in selected] == ["scientific-plotting"]
 
 
+def test_builtin_era5_skill_is_selected_for_era5_downloads():
+    selected = SkillSelector().select("下载 ERA5 位势涡度数据")
+
+    assert "era5-cds" in [item.skill.name for item in selected]
+
+
 def test_skill_selector_always_activates_plotting_skill_for_a_drawing_verb(tmp_path):
     builtin = tmp_path / "builtin"
     _write_skill(builtin, "scientific-plotting", "Scientific plotting workflow.")

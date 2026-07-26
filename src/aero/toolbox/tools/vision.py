@@ -74,16 +74,18 @@ def check_vision_model_config() -> dict:
     configured = vision_is_configured(config)
     mode = config.vision.mode
     if configured and mode == "reuse_primary":
-        provider, model = config.llm.provider, config.llm.model
-        message = f"视觉能力已配置：复用主模型 {provider}/{model}。"
+        resolved = resolved_vision_config(config)
+        assert resolved is not None
+        provider, model = resolved.provider, resolved.model
+        message = f"视觉能力已配置：复用已保存的视觉模型 {provider}/{model}。"
     elif configured:
         provider, model = config.vision.provider, config.vision.model
         message = f"视觉模型已配置：{provider}/{model}。"
     else:
         provider, model = config.vision.provider, config.vision.model
         message = (
-            "尚未配置视觉模型。需要分析图片时，Aero 会打开安全的配置界面；"
-            "你也可以在首次引导中选择复用支持多模态的主模型。"
+            "尚未配置视觉模型。请输入 /vision 打开安全的配置界面，选择或配置视觉模型；"
+            "也可以在首次引导中选择复用支持多模态的主模型。"
         )
     return {
         "status": "configured" if configured else "not_configured",
@@ -127,8 +129,8 @@ async def analyze_image(
         return {
             "status": "not_configured",
             "message": (
-                "当前任务需要视觉模型，但尚未配置视觉能力。请在 Aero 的安全配置界面中"
-                "选择复用支持多模态的主模型，或配置独立视觉模型。"
+                "当前任务需要视觉模型，但尚未配置视觉能力。请输入 /vision 打开安全配置界面，"
+                "选择或配置视觉模型；可复用支持多模态的主模型，或配置独立视觉模型。"
             ),
             "setup_required": "vision",
         }
@@ -186,7 +188,11 @@ def configure_vision_model(api_key: str) -> dict:
     config.vision.provider = "bailian"
     config.vision.model = "qwen3.7-plus"
     save_vision_api_key(
-        api_key, config.vision.base_url, provider=config.vision.provider, model=config.vision.model
+        api_key,
+        config.vision.base_url,
+        provider=config.vision.provider,
+        model=config.vision.model,
+        mode="separate",
     )
     config.save(config_path)
     return {

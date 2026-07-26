@@ -91,6 +91,7 @@ Do not frame `cnmaps` as a China-only boundary package: it provides boundary dat
 
 - If the user wants one foreign country, prefer `get_adm_maps(country="日本", level="国", record="first")` or an `ISO3` code such as `country="JPN"`.
 - If the user wants all world boundaries, use `get_adm_maps(level="国")`. Add `source="世界银行"` only when the user explicitly wants source filtering.
+- For a complex foreign country when only a plotting extent is needed, query the boundary once and use its raw `.bounds`; add geographic padding numerically. **Do not call `MapPolygon.get_extent()`**: it implements the padding as `buffer(2).bounds`, which can take minutes on detailed boundaries such as Brazil. If this happens, do not retry the same command; replace it with the raw-bounds pattern.
 - `source` is a dataset-source filter inside the administrative index. `provider` selects which installed data package backs the query.
 - China and foreign boundaries do not always share identical cartographic semantics near disputed or unsettled borders.
 - The official data docs explicitly call out special handling for neighboring regions and a visible gap near the China-Tajikistan border. When users ask why seams or gaps appear, explain that this comes from differing source semantics rather than a plotting bug.

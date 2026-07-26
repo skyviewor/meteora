@@ -5,6 +5,113 @@ import zipfile
 import pytest
 
 from aero.adapters.cds_adapter import CDSAdapter, _detect_file_format
+from aero.toolbox.tools.era5 import (
+    _era5_time_request_overrides,
+    _is_non_retryable_cds_submit_error,
+)
+
+
+def test_custom_era5_time_keeps_complete_single_day_request():
+    overrides = _era5_time_request_overrides(
+        dataset_id="reanalysis-era5-pressure-levels",
+        day=15,
+        data_format="netcdf",
+        time=["12:00"],
+    )
+    adapter = CDSAdapter(cds_url="https://example.com", cds_key="secret")
+    request = adapter._build_request(
+        "reanalysis-era5-pressure-levels",
+        ["potential_vorticity"],
+        2025,
+        12,
+        15,
+        250,
+        None,
+        "netcdf",
+        overrides,
+    )
+
+    assert request["day"] == ["15"]
+    assert request["time"] == ["12:00"]
+    assert request["product_type"] == ["reanalysis"]
+    assert request["data_format"] == "netcdf"
+    assert request["download_format"] == "unarchived"
+    assert request["variable"] == ["potential_vorticity"]
+    assert request["pressure_level"] == ["250"]
+
+
+def test_invalid_cds_request_is_not_retried():
+    error = RuntimeError(
+        "400 Client Error: Bad Request; invalid request; "
+        "None of the data you have requested is available yet"
+    )
+
+    assert _is_non_retryable_cds_submit_error(error) is True
+    assert _is_non_retryable_cds_submit_error(RuntimeError("connection reset")) is False
+
+
+def test_cds_destination_path_distinguishes_area_and_custom_time():
+    base = CDSAdapter._build_dest_path(
+        "reanalysis-era5-pressure-levels",
+        ["potential_vorticity"],
+        2026,
+        7,
+        None,
+        250,
+        "netcdf",
+    )
+    constrained = CDSAdapter._build_dest_path(
+        "reanalysis-era5-pressure-levels",
+        ["potential_vorticity"],
+        2026,
+        7,
+        None,
+        250,
+        "netcdf",
+        area=[80, 140, 15, 55],
+        time=["12:00"],
+    )
+
+    assert constrained != base
+    assert "area80-140-15-55" in constrained.name
+    assert "t1200" in constrained.name
+
+
+def test_cds_resume_restarts_when_server_ignores_range(tmp_path, monkeypatch):
+    from aero.adapters import cds_adapter
+
+    dest = tmp_path / "partial.nc"
+    dest.write_bytes(b"partial-data")
+    complete = b"complete-response"
+    messages: list[str] = []
+
+    class Response:
+        status_code = 200
+        headers = {"content-length": str(len(complete))}
+
+        def iter_bytes(self, chunk_size):
+            yield complete
+
+    class Stream:
+        def __enter__(self):
+            return Response()
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(cds_adapter.httpx, "stream", lambda *args, **kwargs: Stream())
+    monkeypatch.setattr(cds_adapter, "cancel_requested", lambda: False)
+    monkeypatch.setattr(cds_adapter, "emit_progress", messages.append)
+
+    CDSAdapter._download_file(
+        "https://example.test/data.nc",
+        dest,
+        resume_from=len(b"partial-data"),
+        known_total=len(complete),
+    )
+
+    assert dest.read_bytes() == complete
+    assert any("未接受断点续传" in message for message in messages)
 
 
 @pytest.mark.asyncio

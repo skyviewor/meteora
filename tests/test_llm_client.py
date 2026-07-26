@@ -6,6 +6,7 @@ import pytest
 from aero.agent.llm_client import (
     LLMClient,
     LLMConfig,
+    _dashscope_reference_urls,
     _find_tool_call_marker_start,
     _parse_args,
     _parse_content_tool_calls,
@@ -162,6 +163,15 @@ def test_llm_config_endpoint():
         cfg.endpoint
         == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
     )
+    assert (
+        cfg.dashscope_generation_endpoint
+        == "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    )
+    assert (
+        cfg.dashscope_multimodal_generation_endpoint
+        == "https://dashscope.aliyuncs.com/api/v1/services/aigc/"
+        "multimodal-generation/generation"
+    )
 
 
 def test_request_body_includes_reasoning_effort():
@@ -178,6 +188,130 @@ def test_request_body_omits_empty_reasoning_effort():
     body = client._request_body([Message(role="user", content="Hi")])
 
     assert "reasoning_effort" not in body
+
+
+def test_request_body_can_limit_completion_tokens_for_connectivity_check():
+    client = LLMClient(LLMConfig(api_key="sk-test", max_tokens=1))
+    body = client._request_body([Message(role="user", content="Ping")])
+
+    assert body["max_tokens"] == 1
+
+
+def test_dashscope_multimodal_native_search_body_is_used_for_qwen37_flash():
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian",
+            model="qwen3.7-flash",
+            api_key="sk-test",
+            web_search_enabled=True,
+        )
+    )
+
+    assert client._uses_dashscope_native_search() is True
+    assert client._uses_dashscope_multimodal_search() is True
+    assert (
+        client._dashscope_native_endpoint()
+        == client.config.dashscope_multimodal_generation_endpoint
+    )
+
+    body = client._dashscope_request_body(
+        [Message(role="user", content="最新天气")], stream=True
+    )
+
+    assert body["parameters"]["enable_search"] is True
+    assert body["parameters"]["search_options"] == {
+        "search_strategy": "agent",
+        "enable_source": True,
+    }
+    assert body["parameters"]["incremental_output"] is True
+    assert body["input"]["messages"][0]["content"] == [{"text": "最新天气"}]
+
+
+def test_dashscope_multimodal_native_search_body_is_used_for_qwen35_plus():
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian",
+            model="qwen3.5-plus",
+            api_key="sk-test",
+            web_search_enabled=True,
+        )
+    )
+
+    assert client._uses_dashscope_native_search() is True
+    assert client._uses_dashscope_multimodal_search() is True
+    assert (
+        client._dashscope_native_endpoint()
+        == client.config.dashscope_multimodal_generation_endpoint
+    )
+
+    body = client._dashscope_request_body(
+        [Message(role="user", content="最新天气")], stream=True
+    )
+
+    assert body["parameters"]["search_options"] == {
+        "search_strategy": "agent",
+        "enable_source": True,
+    }
+    assert body["input"]["messages"][0]["content"] == [{"text": "最新天气"}]
+
+
+def test_dashscope_text_native_search_stays_on_text_generation_protocol():
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian",
+            model="deepseek-v4-flash",
+            api_key="sk-test",
+            web_search_enabled=True,
+        )
+    )
+
+    assert client._uses_dashscope_native_search() is True
+    assert client._uses_dashscope_multimodal_search() is False
+    assert client._dashscope_native_endpoint() == client.config.dashscope_generation_endpoint
+
+    body = client._dashscope_request_body([Message(role="user", content="最新天气")])
+    assert body["parameters"]["enable_search"] is True
+    assert body["parameters"]["search_options"] == {
+        "search_strategy": "turbo",
+        "enable_source": True,
+        "enable_citation": True,
+        "citation_format": "[ref_<number>]",
+    }
+    assert body["input"]["messages"][0]["content"] == "最新天气"
+
+
+def test_dashscope_native_search_keeps_tools_in_parameters():
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian", model="qwen3.5-plus", api_key="sk-test", web_search_enabled=True
+        )
+    )
+    tools = [{"type": "function", "function": {"name": "weather", "parameters": {}}}]
+
+    body = client._dashscope_request_body(
+        [Message(role="user", content="天气")], tools=tools, stream=True
+    )
+
+    assert body["parameters"]["tools"] == tools
+    assert body["parameters"]["tool_choice"] == "auto"
+    assert body["parameters"]["search_options"]["search_strategy"] == "agent"
+    assert body["input"]["messages"][0]["content"] == [{"text": "天气"}]
+
+
+def test_dashscope_reference_urls_extracts_provider_sources():
+    response = {
+        "output": {
+            "search_info": {
+                "search_results": [
+                    {"title": "one", "url": "https://example.com/one"},
+                    {"title": "duplicate", "url": "https://example.com/one"},
+                    {"title": "invalid", "url": "not-a-url"},
+                ]
+            }
+        }
+    }
+
+    assert _dashscope_reference_urls(response) == ["https://example.com/one"]
 
 
 def test_llm_request_does_not_accept_brotli_response():
@@ -333,6 +467,142 @@ async def test_llm_stream_retries_before_any_content():
     assert calls == 2
     assert [event.type for event in events] == ["text", "done"]
     assert events[0].content == "恢复了"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_dashscope_native_stream_returns_text_and_sources():
+    from unittest.mock import patch
+
+    class FakeStreamResponse:
+        is_error = False
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            yield "event:result"
+            yield (
+                'data: {"output":{"choices":[{"message":{"content":"最"}}],'
+                '"search_info":{"search_results":[{"url":"https://example.com/source"}]}}}'
+            )
+            yield 'data: {"output":{"choices":[{"message":{"content":"最新结果"}}]}}'
+            yield "data: [DONE]"
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian", model="qwen3.7-flash", api_key="sk-test", web_search_enabled=True
+        )
+    )
+    with patch.object(client._client, "stream", return_value=FakeStream()) as stream:
+        events = [
+            event
+            async for event in client.chat_with_tools_stream(
+                [Message(role="user", content="最新天气")], tools=[]
+            )
+        ]
+
+    assert [event.type for event in events] == ["references", "text", "text", "done"]
+    assert events[0].references == ["https://example.com/source"]
+    assert "".join(event.content for event in events if event.type == "text") == "最新结果"
+    assert (
+        stream.call_args.args[1]
+        == client.config.dashscope_multimodal_generation_endpoint
+    )
+    assert stream.call_args.kwargs["headers"]["X-DashScope-SSE"] == "enable"
+    body = stream.call_args.kwargs["json"]
+    assert body["parameters"]["incremental_output"] is True
+    assert body["parameters"]["search_options"]["search_strategy"] == "agent"
+    assert body["input"]["messages"][0]["content"] == [{"text": "最新天气"}]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_dashscope_native_empty_clean_stream_is_not_silently_completed():
+    from unittest.mock import patch
+
+    class FakeStreamResponse:
+        is_error = False
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            yield "data: [DONE]"
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian", model="qwen3.7-flash", api_key="sk-test", web_search_enabled=True
+        )
+    )
+    with patch.object(client._client, "stream", return_value=FakeStream()):
+        with pytest.raises(RuntimeError, match="未返回有效响应"):
+            _ = [
+                event
+                async for event in client.chat_with_tools_stream(
+                    [Message(role="user", content="最新天气")], tools=[]
+                )
+            ]
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_dashscope_native_json_error_body_is_not_silently_completed():
+    from unittest.mock import patch
+
+    class FakeStreamResponse:
+        is_error = False
+        status_code = 200
+
+        async def aread(self):
+            return b""
+
+        def raise_for_status(self):
+            pass
+
+        async def aiter_lines(self):
+            yield '{"code":"InvalidParameter","message":"bad search option"}'
+
+    class FakeStream:
+        async def __aenter__(self):
+            return FakeStreamResponse()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    client = LLMClient(
+        LLMConfig(
+            provider="bailian", model="qwen3.7-flash", api_key="sk-test", web_search_enabled=True
+        )
+    )
+    with patch.object(client._client, "stream", return_value=FakeStream()):
+        with pytest.raises(RuntimeError, match="bad search option"):
+            _ = [
+                event
+                async for event in client.chat_stream([Message(role="user", content="天气")])
+            ]
     await client.close()
 
 

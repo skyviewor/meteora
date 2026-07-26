@@ -160,6 +160,29 @@ async def test_search_web_guides_setup_when_vision_key_is_missing(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_web_detects_bailian_model_key_waiting_for_reuse_authorization(
+    monkeypatch,
+):
+    """A primary Bailian key must not be mistaken for an absent credential."""
+    config = AeroConfig.create_default()
+    config.llm.provider = "bailian"
+    config.llm.model = "qwen3.7-plus"
+    config.llm.set_active_api_key("sk-bailian-primary")
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    result = await web_search.search_web("最近一次西太平洋台风")
+
+    assert result["found"] is False
+    assert result["reusable_model_api_key_detected"] is True
+    assert result["reuse_available"] is True
+    assert result["authorization_required"] is True
+    assert "无需重新创建或输入" in result["message"]
+    assert "智谱 AI 搜索" in result["message"]
+    assert result["provider_options"] == ["bailian", "zhipu"]
+    assert "sk-bailian-primary" not in repr(result)
+
+
+@pytest.mark.asyncio
 async def test_check_web_search_status_reports_missing_credential(monkeypatch):
     config = AeroConfig.create_default()
     monkeypatch.setattr(web_search, "find_config", lambda: config)
@@ -287,3 +310,12 @@ def test_web_search_status_is_registered_without_confirmation():
 
     assert spec is not None
     assert spec.requires_confirmation is False
+
+def test_bailian_native_search_capability_is_model_specific():
+    from aero.data.web_search import bailian_native_search_supported
+
+    assert bailian_native_search_supported("qwen3.7-plus") is True
+    assert bailian_native_search_supported("qwen3.7-flash") is True
+    assert bailian_native_search_supported("deepseek-v4-flash") is True
+    assert bailian_native_search_supported("deepseek-v4-pro") is True
+    assert bailian_native_search_supported("glm-5.2") is False

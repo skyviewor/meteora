@@ -102,8 +102,9 @@ async def download_era5(
     """Download ERA5 data from CDS."""
     from threading import Lock
 
+    from aero.agent.progress import cancel_requested as _cancelled
+    from aero.agent.progress import emit_progress
     from aero.data.download_store import CDSDownloadStore
-    from aero.agent.progress import emit_progress, cancel_requested as _cancelled
 
     try:
         year = int(year)
@@ -145,6 +146,7 @@ async def download_era5(
         pressure_level=pressure_level,
         area=area,
         data_format=data_format,
+        time=time,
     )
     if cached_result is not None:
         return cached_result
@@ -162,8 +164,9 @@ async def download_era5(
             "credential_request": credential_request_for("cds"),
             "message": (
                 "CDS API key 未配置。请在 https://cds.climate.copernicus.eu/ 注册账户，"
-                "进入 User Profile → API key。Aero 将打开本地安全输入框，"
-                "请在那里粘贴官方显示的两行配置：url: ... 和 key: ..."
+                "进入 User Profile → API key 并复制官方显示的两行配置。"
+                "先向用户说明这些步骤，并要求用户只回复“准备好了”或“打开安全输入框”；"
+                "不得要求其将凭证发送到聊天框，也不得立刻弹出输入窗口。"
             ),
         }
 
@@ -221,11 +224,23 @@ async def download_era5(
                 status="downloading",
             )
 
-    # ── CDS submit (retry up to 5 times) ──
+    # ``request_overrides`` replaces (rather than augments) the adapter's
+    # default request.  A custom time therefore must carry the remaining ERA5
+    # request fields too.  Passing only {"time": ...} used to drop ``day``
+    # and the required product/format fields, which CDS misleadingly reports
+    # as "data not available yet" even for historical dates.
+    overrides = _era5_time_request_overrides(
+        dataset_id=dataset_id,
+        day=day,
+        data_format=data_format,
+        time=time,
+    )
+
+    # ── CDS submit (retry transient failures only, up to 5 times) ──
     cds_submit_error = None
+    meta = None
     for cds_attempt in range(5):
         try:
-            overrides = {"time": time} if time else None
             meta = await adapter.submit(
                 dataset_id=dataset_id,
                 variables=variables,
@@ -244,11 +259,14 @@ async def download_era5(
             cds_submit_error = e
             if isinstance(e, asyncio.CancelledError):
                 break
+            if _is_non_retryable_cds_submit_error(e):
+                emit_progress("CDS 拒绝了该请求（参数或可用时次无效），不会重复提交。")
+                break
             if cds_attempt < 4:
                 delay = 2**cds_attempt
                 emit_progress(f"CDS 提交失败，{delay}s 后重试（第 {cds_attempt + 1}/5 次）: {e}")
                 await asyncio.sleep(delay)
-    else:
+    if meta is None:
         err_msg = (
             str(cds_submit_error)
             if not isinstance(cds_submit_error, asyncio.CancelledError)
@@ -300,20 +318,19 @@ async def download_era5(
     # ── CDS fetch (retry up to 5 times) ──
     emit_progress(f"正在下载文件：{short_path(dest_path)}")
     progress_reporter = download_progress_reporter()
-    if total_bytes > 0:
-        progress_reporter(
-            min(dest_path.stat().st_size, total_bytes) if dest_path.exists() else 0,
-            total_bytes,
-            force=True,
-        )
     cds_fetch_error = None
     for cds_fetch_attempt in range(5):
         try:
+            # Each HTTP connection needs its own throughput baseline while
+            # retaining one progress identity for the UI.  On a resumed
+            # attempt, bytes already on disk were not transferred through the
+            # new connection.
             if total_bytes > 0:
                 progress_reporter(
                     min(dest_path.stat().st_size, total_bytes) if dest_path.exists() else 0,
                     total_bytes,
                     force=True,
+                    reset_measurement=cds_fetch_attempt > 0,
                 )
             file_size = await adapter.fetch(
                 download_url=download_url,
@@ -483,6 +500,43 @@ async def check_era5_availability(
     )
 
 
+def _era5_time_request_overrides(
+    *,
+    dataset_id: str,
+    day: int | None,
+    data_format: str,
+    time: list[str] | None,
+) -> dict | None:
+    """Build a complete ERA5 request only when callers select hourly times.
+
+    ``CDSAdapter.request_overrides`` intentionally replaces its normal request
+    body so that ADS/CAMS can supply their own schema.  ERA5's custom-time
+    case must consequently include the normal ERA5 fields explicitly.
+    """
+    if not time:
+        return None
+
+    request = {
+        "product_type": ["reanalysis"],
+        "data_format": data_format,
+        "download_format": "unarchived",
+        "time": time,
+    }
+    if "monthly" not in dataset_id:
+        request["day"] = [f"{day:02d}"] if day else [f"{d:02d}" for d in range(1, 32)]
+    return request
+
+
+def _is_non_retryable_cds_submit_error(error: BaseException) -> bool:
+    """Return whether retrying a CDS submit cannot change the outcome."""
+    text = str(error).lower()
+    return (
+        "400 client error" in text
+        or "invalid request" in text
+        or "none of the data you have requested is available yet" in text
+    )
+
+
 
 
 def _reuse_existing_era5_file(
@@ -497,6 +551,7 @@ def _reuse_existing_era5_file(
     pressure_level: int | None,
     area: list[float] | None,
     data_format: str,
+    time: list[str] | None,
 ) -> dict | None:
     if data_format not in ("netcdf", "grib"):
         return None
@@ -515,6 +570,8 @@ def _reuse_existing_era5_file(
                 day,
                 pressure_level,
                 data_format,
+                area=area,
+                time=time,
             ),
             "cds",
         )

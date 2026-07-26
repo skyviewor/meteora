@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from rich.table import Table
@@ -15,6 +16,7 @@ from textual.screen import Screen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets._option_list import Option
 
+from aero.core.types import Message
 from aero.core.llm_providers import (
     BUILTIN_LLM_PROVIDERS,
     model_supports_vision,
@@ -172,6 +174,10 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         margin-top: 1;
     }
 
+    #setup-error.setup-success {
+        color: $success;
+    }
+
     #setup-hint {
         width: 100%;
         height: 1;
@@ -184,6 +190,7 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
     BINDINGS = [("escape", "cancel", "取消")]
     _FORM_INPUT_IDS = ("#setup-url", "#setup-model", "#setup-key")
     _ACTION_IDS = ("#setup-next", "#setup-skip", "#setup-back", "#setup-cancel")
+    _CONNECTION_SUCCESS_DELAY = 1.0
 
     def __init__(
         self,
@@ -209,6 +216,9 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         self._web_search: dict[str, Any] = {"configured": False}
         self._selected_action = 0
         self._action_focused = False
+        self._verifying_primary = False
+        self._verifying_vision = False
+        self._verifying_web_search = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-dialog"):
@@ -289,6 +299,13 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             if event.key in {"up", "down", "tab", "shift+tab"}:
                 event.stop()
                 event.prevent_default()
+                # A delayed cleanup event from a formerly focused OptionList
+                # may leave the screen without a focusable widget for one
+                # frame. Recover first, rather than interpreting that key as
+                # navigation from an invisible list.
+                if not isinstance(self.focused, Input):
+                    self._focus_first_visible_field()
+                    return
                 delta = -1 if event.key in {"up", "shift+tab"} else 1
                 self._move_form_focus(delta)
             elif event.key == "enter":
@@ -322,18 +339,28 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             options = OptionList(id="setup-list")
             choice_slot.mount(options)
         elif not choice_page and options is not None:
-            options.remove()
-            options = None
+            # Keep the list mounted while it is hidden. Removing the focused
+            # OptionList defers focus cleanup inside Textual; that later
+            # cleanup can steal focus back from an input when the user returns
+            # from a visual-model choice page to this form.
+            options.clear_options()
         choice_slot.display = choice_page
         choice_slot.styles.display = "block" if choice_page else "none"
         choice_slot.styles.height = "auto" if choice_page else 0
         if options is not None:
+            options.display = choice_page
             options.clear_options()
 
+        error.remove_class("setup-success")
         error.update("")
         form.display = False
         for selector in self._FORM_INPUT_IDS:
-            self.query_one(selector, Input).display = True
+            field = self.query_one(selector, Input)
+            field.display = True
+            # Primary connection verification temporarily disables every
+            # field. A successful check leaves this screen for the vision
+            # step, so reset the state whenever a form is rendered again.
+            field.disabled = False
         self.query_one("#setup-provider-help", Static).display = False
         form.refresh(layout=True)
         self._set_actions(next_visible=False, back_visible=False)
@@ -396,17 +423,26 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             self._set_actions(
                 next_visible=True,
                 back_visible=not self._primary_only,
-                skip_visible=not self._primary_only,
+                # A primary chat model is required.  Visual and search setup
+                # have their own optional choices on subsequent pages.
+                skip_visible=False,
             )
             self.query_one("#setup-next", Static).update(
-                "保存并切换" if self._primary_only else "继续配置视觉能力"
+                "保存并切换" if self._primary_only else "继续"
             )
             self._focus_first_visible_field()
         elif self._page == "vision_mode":
             subtitle.update("步骤 2 / 2：视觉模型可选。它用于读图、图表、卫星云图、雷达图和图像型 PDF。")
             items = []
             if self._primary_supports_vision:
-                items.append(Option("复用主模型能力", id="reuse_primary"))
+                items.append(Option("复用当前模型多模态能力", id="reuse_primary"))
+            elif self._can_reuse_bailian_primary_key():
+                items.append(
+                    Option(
+                        "复用主模型已配置的百炼 API Key（选择视觉模型）",
+                        id="reuse_bailian_primary_key",
+                    )
+                )
             items.append(Option("暂不配置，需要时再提示", id="unconfigured"))
             items.append(Option("配置独立视觉模型", id="separate"))
             options.display = True
@@ -420,12 +456,15 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             subtitle.update("选择视觉模型。视觉模型只在需要读取图片时调用。")
             assert options is not None
             for provider_id, preset in BUILTIN_LLM_PROVIDERS.items():
+                if self._vision.get("_reuse_bailian_primary_key") and provider_id != "bailian":
+                    continue
                 for model in preset.models:
                     if _msv(provider_id, model):
                         options.add_option(
                             _vision_option(provider_id, model, preset.name)
                         )
-            options.add_option(Option("其他 OpenAI-compatible 视觉接口", id="custom"))
+            if not self._vision.get("_reuse_bailian_primary_key"):
+                options.add_option(Option("其他 OpenAI-compatible 视觉接口", id="custom"))
             self._set_actions(next_visible=False, back_visible=True)
             options.highlighted = 0
             options.focus()
@@ -454,18 +493,28 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                     else Option("配置智谱 AI 搜索", id="configure_zhipu")
                 ),
             }
-            primary_provider = next(
+            reusable_provider = next(
                 (
                     provider
                     for provider, source in (("bailian", bailian_source), ("zhipu", zhipu_source))
                     if source == "主模型"
                 ),
-                "",
+                next(
+                    (
+                        provider
+                        for provider, source in (
+                            ("bailian", bailian_source),
+                            ("zhipu", zhipu_source),
+                        )
+                        if source
+                    ),
+                    "",
+                ),
             )
             items = (
-                [provider_items[primary_provider], Option("暂不配置，需要时再提示", id="skip")]
-                + [item for provider, item in provider_items.items() if provider != primary_provider]
-                if primary_provider
+                [provider_items[reusable_provider], Option("暂不配置，需要时再提示", id="skip")]
+                + [item for provider, item in provider_items.items() if provider != reusable_provider]
+                if reusable_provider
                 else [Option("暂不配置，需要时再提示", id="skip"), *provider_items.values()]
             )
             options.add_options(items)
@@ -531,6 +580,13 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         self._set_input("model", self._vision.get("model", ""))
         self._set_input("key", "")
 
+    def _can_reuse_bailian_primary_key(self) -> bool:
+        """Whether a Bailian chat credential can seed a separate vision model."""
+        return bool(
+            self._primary.get("provider") == "bailian"
+            and str(self._primary.get("api_key") or "").strip()
+        )
+
     def _show_preset_provider_help(self, provider: str) -> None:
         """Show the key acquisition help instead of fixed preset fields."""
         preset = BUILTIN_LLM_PROVIDERS.get(provider)
@@ -556,12 +612,17 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             "bailian": (
                 "阿里云百炼",
                 "https://bailian.console.aliyun.com/cn-beijing/?apiKey=1&tab=globalset#/efm/api_key",
-                "还需要在 MCP 广场开通联网搜索 MCP。",
+                "创建或复制 DashScope API Key 后，还必须进入百炼 MCP 广场，"
+                "搜索“WebSearch”或“联网搜索”，点击“立即开通 → 确认开通”。"
+                "API Key 与 MCP 开通两项缺一不可，并请确认账户余额和调用额度可用。"
+                "计费：全部用户前 2000 次调用免费，之后按 29 元/千次计费；"
+                "价格可能调整，以阿里云官方页面为准。",
             ),
             "zhipu": (
                 "智谱 AI",
                 "https://open.bigmodel.cn/apikey/platform",
-                "在开放平台创建 API Key 后粘贴到下方。",
+                "在开放平台创建 API Key 后粘贴到下方；无需开通百炼 MCP。"
+                "请确认智谱账户余额和搜索调用额度可用。",
             ),
         }
         url, model = defaults.get(provider, defaults["bailian"])
@@ -607,6 +668,8 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
     def _focus_first_visible_field(self) -> None:
         self._action_focused = False
         visible = self._visible_input_ids()
+        if not visible:
+            return
         # API keys are the only value users normally need to type on a
         # pre-filled connection form, so place the cursor there first.
         target = "#setup-key" if "#setup-key" in visible else visible[0]
@@ -726,6 +789,18 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                 self._page = "web_search_setup"
                 self._render_page()
                 return
+            if choice == "reuse_bailian_primary_key":
+                preset = BUILTIN_LLM_PROVIDERS["bailian"]
+                self._vision = {
+                    "mode": "separate",
+                    "provider": "bailian",
+                    "base_url": str(self._primary.get("base_url") or preset.base_url),
+                    "api_key": str(self._primary["api_key"]),
+                    "_reuse_bailian_primary_key": True,
+                }
+                self._page = "vision_model"
+                self._render_page()
+                return
             self._vision = {"mode": "separate"}
             self._page = "vision_model"
         elif self._page == "vision_model":
@@ -737,6 +812,16 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                 provider, model = choice.split("|", 1)
                 self._vision["provider"] = provider
                 self._vision["model"] = model
+                if self._vision.pop("_reuse_bailian_primary_key", False):
+                    # The provider key was already entered for the primary
+                    # model, so selecting a compatible visual model completes
+                    # this optional setup without asking for it again.
+                    if self._vision_only:
+                        self._finish()
+                        return
+                    self._page = "web_search_setup"
+                    self._render_page()
+                    return
                 self._page = "vision_form"
         elif self._page == "web_search_setup":
             if choice == "skip":
@@ -749,7 +834,10 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                     "provider": "bailian",
                     "api_key": self._search_credential("bailian"),
                 }
-                self._finish()
+                self._page = "web_search_form"
+                self._render_page()
+                self._verifying_web_search = True
+                self.run_worker(self._verify_web_search_connection(self._web_search), exclusive=True)
                 return
             if choice == "reuse_zhipu":
                 self._web_search = {
@@ -757,7 +845,10 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
                     "provider": "zhipu",
                     "api_key": self._search_credential("zhipu"),
                 }
-                self._finish()
+                self._page = "web_search_form"
+                self._render_page()
+                self._verifying_web_search = True
+                self.run_worker(self._verify_web_search_connection(self._web_search), exclusive=True)
                 return
             provider = "bailian" if choice == "configure_bailian" else choice.removeprefix("configure_")
             self._web_search = {"configured": True, "provider": provider}
@@ -770,28 +861,34 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             self._render_page()
             return
         if self._page == "primary_form":
+            if self._verifying_primary:
+                return
             values = self._form_values()
             if not self._validate(values):
                 return
-            self._primary.update(values)
-            self._primary_supports_vision = model_supports_vision(values["provider"], values["model"])
-            if self._primary_only:
-                self._vision = {"mode": "unconfigured"}
-                self._finish()
-                return
-            self._page = "vision_mode"
-            self._render_page()
+            self._verifying_primary = True
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update("正在测试模型连接，请稍候…")
+            for selector in self._FORM_INPUT_IDS:
+                self.query_one(selector, Input).disabled = True
+            self._set_actions(next_visible=False, back_visible=False)
+            self.run_worker(self._verify_primary_connection(values), exclusive=True)
             return
         if self._page == "vision_form":
+            if self._verifying_vision:
+                return
             values = self._form_values()
             if not self._validate(values):
                 return
-            self._vision.update(values)
-            if self._vision_only:
-                self._finish()
-                return
-            self._page = "web_search_setup"
-            self._render_page()
+            self._verifying_vision = True
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update("正在测试视觉模型连接，请稍候…")
+            for selector in self._FORM_INPUT_IDS:
+                self.query_one(selector, Input).disabled = True
+            self._set_actions(next_visible=False, back_visible=False)
+            self.run_worker(self._verify_vision_connection(values), exclusive=True)
             return
         if self._page == "web_search_form":
             values = self._form_values()
@@ -800,8 +897,120 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             if missing:
                 self.query_one("#setup-error", Static).update("请填写：" + "、".join(missing))
                 return
+            if self._verifying_web_search:
+                return
+            self._verifying_web_search = True
             self._web_search.update(values)
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update("正在测试网页搜索连接，请稍候…")
+            self.query_one("#setup-key", Input).disabled = True
+            self._set_actions(next_visible=False, back_visible=False)
+            self.run_worker(self._verify_web_search_connection(values), exclusive=True)
+
+    async def _verify_primary_connection(self, values: dict[str, str]) -> None:
+        """Block setup until the chosen endpoint accepts its API key and model."""
+        try:
+            await _test_primary_connection(values)
+        except Exception as exc:
+            self._verifying_primary = False
+            for selector in self._FORM_INPUT_IDS:
+                self.query_one(selector, Input).disabled = False
+            self._set_actions(
+                next_visible=True,
+                back_visible=not self._primary_only,
+                skip_visible=False,
+            )
+            detail = str(exc).replace("\n", " ").strip()
+            if len(detail) > 240:
+                detail = detail[:237] + "…"
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update(
+                f"连通性测试失败：{detail or '无法连接模型服务。'} 请检查 API Key、接口地址和模型 ID。"
+            )
+            self._focus_first_visible_field()
+            return
+
+        status = self.query_one("#setup-error", Static)
+        status.add_class("setup-success")
+        status.update("测试通过")
+        await asyncio.sleep(self._CONNECTION_SUCCESS_DELAY)
+
+        self._verifying_primary = False
+        self._primary.update(values)
+        self._primary_supports_vision = model_supports_vision(
+            values["provider"], values["model"]
+        )
+        if self._primary_only:
+            self._vision = {"mode": "unconfigured"}
             self._finish()
+            return
+        self._page = "vision_mode"
+        self._render_page()
+
+    async def _verify_vision_connection(self, values: dict[str, str]) -> None:
+        """Verify a visual endpoint without sending an image, then continue."""
+        try:
+            await _test_primary_connection(values)
+        except Exception as exc:
+            self._verifying_vision = False
+            for selector in self._FORM_INPUT_IDS:
+                self.query_one(selector, Input).disabled = False
+            self._set_actions(next_visible=True, back_visible=True)
+            detail = str(exc).replace("\n", " ").strip()
+            if len(detail) > 240:
+                detail = detail[:237] + "…"
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update(
+                f"连通性测试失败：{detail or '无法连接视觉模型服务。'} 请检查 API Key、接口地址和模型 ID。"
+            )
+            self._focus_first_visible_field()
+            return
+
+        status = self.query_one("#setup-error", Static)
+        status.add_class("setup-success")
+        status.update("测试通过")
+        await asyncio.sleep(self._CONNECTION_SUCCESS_DELAY)
+
+        self._verifying_vision = False
+        self._vision.update(values)
+        if self._vision_only:
+            self._finish()
+            return
+        self._page = "web_search_setup"
+        self._render_page()
+
+    async def _verify_web_search_connection(self, values: dict[str, str]) -> None:
+        """Verify the selected MCP/direct search service before setup completes."""
+        try:
+            from aero.data.web_search import check_bailian_web, search_zhipu_web
+
+            if values["provider"] == "bailian":
+                await check_bailian_web(values["api_key"])
+            elif values["provider"] == "zhipu":
+                await search_zhipu_web(values["api_key"], "联网搜索连通性测试", limit=1)
+            else:
+                raise RuntimeError("不支持的网页搜索供应商")
+        except Exception as exc:
+            self._verifying_web_search = False
+            self.query_one("#setup-key", Input).disabled = False
+            self._set_actions(next_visible=True, back_visible=True)
+            detail = str(exc).replace("\n", " ").strip()[:240]
+            status = self.query_one("#setup-error", Static)
+            status.remove_class("setup-success")
+            status.update(f"网页搜索连通性测试失败：{detail or '服务不可用'}")
+            self._focus_first_visible_field()
+            return
+        status = self.query_one("#setup-error", Static)
+        status.add_class("setup-success")
+        status.update("测试通过")
+        await asyncio.sleep(self._CONNECTION_SUCCESS_DELAY)
+        self._verifying_web_search = False
+        self._web_search.update(values)
+        self._web_search["mcp_verified"] = True
+        self._finish()
 
     def _form_values(self) -> dict[str, str]:
         if self._page == "web_search_form":
@@ -855,6 +1064,11 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         }
         self._page = previous.get(self._page, "source")
         self._render_page()
+        if self._page in {"primary_form", "vision_form", "web_search_form"}:
+            # Textual completes focus cleanup for the formerly focused
+            # OptionList after this handler returns. Focus once more after
+            # that cleanup has run, so returning to a form is deterministic.
+            self.set_timer(0.05, self._focus_first_visible_field)
 
     def _finish(self) -> None:
         if self._vision_only:
@@ -866,3 +1080,26 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             "vision": self._vision,
             "web_search": self._web_search,
         })
+
+
+async def _test_primary_connection(values: dict[str, str]) -> None:
+    """Perform the smallest real completion request accepted by the chosen API.
+
+    A successful response verifies the endpoint, API key and selected model
+    together.  `max_tokens=1` keeps this setup-time check negligible in cost.
+    """
+    from aero.agent.llm_client import LLMClient, LLMConfig
+
+    client = LLMClient(
+        LLMConfig(
+            provider=values["provider"],
+            model=values["model"],
+            api_key=values["api_key"],
+            base_url=values["base_url"],
+            max_tokens=1,
+        )
+    )
+    try:
+        await client.chat([Message(role="user", content="Reply with OK.")])
+    finally:
+        await client.close()

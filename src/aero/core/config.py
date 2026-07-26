@@ -132,10 +132,14 @@ class VisionConfig(BaseModel):
 class WebSearchConfig(BaseModel):
     """Credentials and connection settings for the optional web search service."""
 
+    enabled: bool = False
     provider: str = "bailian"
     model: str = "qwen-turbo"
     api_key: str = ""
     base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    mcp_verified: bool = False
+    mcp_verified_provider: str = ""
+    mcp_verified_at: float = 0.0
 
 
 class EmailConfig(BaseModel):
@@ -232,19 +236,43 @@ def save_user_secrets(data: dict) -> None:
 
 
 def apply_user_secrets(config: AeroConfig) -> AeroConfig:
+    # Provider IDs were not canonicalized by older releases. Normalize both
+    # project profiles and user-level secret profiles so historical names such
+    # as "dashscope", "aliyun" and "qwen" remain discoverable as Bailian.
+    from aero.core.llm_providers import normalize_provider_id
+
+    normalized_profiles: dict[str, LLMProviderConfig] = {}
+    for saved_provider, profile in config.llm.providers.items():
+        canonical = normalize_provider_id(saved_provider)
+        existing = normalized_profiles.get(canonical)
+        if existing is None:
+            normalized_profiles[canonical] = profile
+        else:
+            existing.api_key = existing.api_key or profile.api_key
+            existing.model = existing.model or profile.model
+            existing.base_url = existing.base_url or profile.base_url
+    config.llm.providers = normalized_profiles
+    config.llm.provider = normalize_provider_id(config.llm.provider)
+
     secrets = load_user_secrets()
     llm = secrets.get("llm")
     if isinstance(llm, dict):
         providers = llm.get("providers")
         if isinstance(providers, dict):
-            for provider, values in providers.items():
+            # Load aliases first and canonical entries last, so an explicitly
+            # saved canonical profile wins if both forms exist.
+            ordered_providers = sorted(
+                providers.items(),
+                key=lambda item: normalize_provider_id(str(item[0])) == str(item[0]).strip().lower(),
+            )
+            for provider, values in ordered_providers:
                 if not isinstance(values, dict):
                     continue
-                profile = config.llm.provider_config(str(provider))
+                profile = config.llm.provider_config(normalize_provider_id(str(provider)))
                 profile.api_key = str(values.get("api_key") or profile.api_key)
                 profile.model = str(values.get("model") or profile.model)
                 profile.base_url = str(values.get("base_url") or profile.base_url)
-        active_provider = str(llm.get("active_provider") or "")
+        active_provider = normalize_provider_id(str(llm.get("active_provider") or ""))
         if active_provider and active_provider in config.llm.providers:
             config.llm.switch_provider(active_provider)
         elif not config.llm.active_api_key():
@@ -267,9 +295,14 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
     vision = secrets.get("vision")
     legacy_web_search_secret = _is_legacy_web_search_in_vision(vision)
     if isinstance(vision, dict):
+        saved_mode = str(vision.get("mode") or "").strip()
+        if saved_mode in {"reuse_primary", "separate", "unconfigured"}:
+            config.vision.mode = saved_mode
         config.vision.api_key = str(vision.get("api_key") or config.vision.api_key)
         config.vision.base_url = str(vision.get("base_url") or config.vision.base_url)
-        config.vision.provider = str(vision.get("provider") or config.vision.provider)
+        config.vision.provider = normalize_provider_id(
+            str(vision.get("provider") or config.vision.provider)
+        )
         # Older releases accidentally wrote the web-search model (qwen-turbo)
         # into this section. It is not a vision model, so do not let it replace
         # the visual model selected by the project.
@@ -281,10 +314,16 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
 
     web_search = secrets.get("web_search")
     if isinstance(web_search, dict):
+        config.web_search.enabled = bool(web_search.get("enabled", config.web_search.enabled))
         config.web_search.api_key = str(web_search.get("api_key") or config.web_search.api_key)
         config.web_search.base_url = str(web_search.get("base_url") or config.web_search.base_url)
-        config.web_search.provider = str(web_search.get("provider") or config.web_search.provider)
+        config.web_search.provider = normalize_provider_id(
+            str(web_search.get("provider") or config.web_search.provider)
+        )
         config.web_search.model = str(web_search.get("model") or config.web_search.model)
+        config.web_search.mcp_verified = bool(web_search.get("mcp_verified", False))
+        config.web_search.mcp_verified_provider = str(web_search.get("mcp_verified_provider") or "")
+        config.web_search.mcp_verified_at = float(web_search.get("mcp_verified_at") or 0.0)
     elif legacy_web_search_secret and isinstance(vision, dict):
         # Keep the credential usable after upgrading without preserving the
         # incorrect vision-model override. It will be saved independently the
@@ -312,7 +351,11 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
     config.llm.migrate_deprecated_models()
     config.llm.refresh_capabilities()
     removed_primary_provider = config.llm.migrate_removed_provider()
-    if removed_primary_provider and config.vision.mode == "reuse_primary":
+    if (
+        removed_primary_provider
+        and config.vision.mode == "reuse_primary"
+        and config.vision.provider.strip().lower() == removed_primary_provider
+    ):
         config.vision = VisionConfig(cache_ttl_hours=config.vision.cache_ttl_hours)
     elif config.vision.provider.strip().lower() in _REMOVED_LLM_PROVIDERS:
         config.vision = VisionConfig(cache_ttl_hours=config.vision.cache_ttl_hours)
@@ -377,9 +420,12 @@ def save_vision_api_key(
     *,
     provider: str = "",
     model: str = "",
+    mode: str = "separate",
 ) -> None:
+    """Persist a standalone visual endpoint and its credential for every project."""
     secrets = load_user_secrets()
     vision = secrets.setdefault("vision", {})
+    vision["mode"] = mode
     vision["api_key"] = api_key
     if base_url:
         vision["base_url"] = base_url
@@ -387,6 +433,32 @@ def save_vision_api_key(
         vision["provider"] = provider
     if model:
         vision["model"] = model
+    save_user_secrets(secrets)
+
+
+def save_vision_profile(
+    mode: str,
+    *,
+    provider: str = "",
+    model: str = "",
+    base_url: str = "",
+) -> None:
+    """Persist visual-model selection without duplicating a provider credential."""
+    if mode not in {"reuse_primary", "separate", "unconfigured"}:
+        raise ValueError(f"Unsupported vision mode: {mode}")
+    secrets = load_user_secrets()
+    vision = secrets.setdefault("vision", {})
+    vision["mode"] = mode
+    if mode == "reuse_primary":
+        # A reused provider profile owns its own credential.  Do not retain a
+        # stale, separately-entered visual key from a prior configuration.
+        vision.pop("api_key", None)
+    if provider:
+        vision["provider"] = provider
+    if model:
+        vision["model"] = model
+    if base_url:
+        vision["base_url"] = base_url
     save_user_secrets(secrets)
 
 
@@ -401,6 +473,10 @@ def save_web_search_api_key(
     secrets = load_user_secrets()
     web_search = secrets.setdefault("web_search", {})
     web_search["api_key"] = api_key
+    # A new credential must be verified before it can be trusted.
+    web_search["mcp_verified"] = False
+    web_search["mcp_verified_provider"] = ""
+    web_search["mcp_verified_at"] = 0.0
     if base_url:
         web_search["base_url"] = base_url
     if provider:
@@ -410,16 +486,60 @@ def save_web_search_api_key(
     save_user_secrets(secrets)
 
 
+def save_web_search_state(
+    *,
+    enabled: bool | None = None,
+    mcp_verified: bool | None = None,
+    mcp_verified_provider: str | None = None,
+    mcp_verified_at: float | None = None,
+) -> None:
+    """Persist non-secret web-search state in the user-level secrets profile."""
+    secrets = load_user_secrets()
+    web_search = secrets.setdefault("web_search", {})
+    if enabled is not None:
+        web_search["enabled"] = bool(enabled)
+    if mcp_verified is not None:
+        web_search["mcp_verified"] = bool(mcp_verified)
+    if mcp_verified_provider is not None:
+        web_search["mcp_verified_provider"] = mcp_verified_provider
+    if mcp_verified_at is not None:
+        web_search["mcp_verified_at"] = float(mcp_verified_at)
+    save_user_secrets(secrets)
+
+
 def vision_is_configured(config: AeroConfig) -> bool:
     if config.vision.mode == "separate":
         return bool(config.vision.model and _separate_vision_api_key(config))
     if config.vision.mode == "reuse_primary":
+        # "Reuse" is a saved visual profile, not a live alias of whichever
+        # text model happens to be active later.  This lets a user configure
+        # Bailian during onboarding, then switch the chat model to DeepSeek
+        # without losing image-analysis capability.
+        if config.vision.model and _separate_vision_api_key(config):
+            return True
+
+        # Compatibility with older user profiles which recorded only the
+        # mode.  New profiles always persist the selected provider/model.
         return bool(config.llm.supports_vision and config.llm.model and config.llm.active_api_key())
     return False
 
 
 def resolved_vision_config(config: AeroConfig) -> VisionConfig | None:
+    if config.vision.mode == "reuse_primary" and config.vision.model:
+        saved_api_key = _separate_vision_api_key(config)
+        if saved_api_key:
+            return VisionConfig(
+                mode="reuse_primary",
+                provider=config.vision.provider,
+                model=config.vision.model,
+                api_key=saved_api_key,
+                base_url=_separate_vision_base_url(config),
+                cache_ttl_hours=config.vision.cache_ttl_hours,
+            )
+
     if config.vision.mode == "reuse_primary" and vision_is_configured(config):
+        # Legacy fallback for profiles created before the visual profile was
+        # persisted independently from the active text-model selection.
         return VisionConfig(
             mode="reuse_primary",
             provider=config.llm.provider,

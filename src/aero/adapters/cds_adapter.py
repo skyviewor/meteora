@@ -53,6 +53,8 @@ class CDSAdapter:
         if data_format not in ("netcdf", "grib"):
             raise ValueError(f"不支持的格式: {data_format}，仅支持 netcdf 和 grib")
 
+        request = self._build_request(dataset_id, variables, year, month, day,
+                                      pressure_level, area, data_format, request_overrides)
         dest_path = dest_path or self._build_dest_path(
             dataset_id,
             variables,
@@ -61,9 +63,9 @@ class CDSAdapter:
             day,
             pressure_level,
             data_format,
+            area=area,
+            time=request_overrides.get("time") if request_overrides else None,
         )
-        request = self._build_request(dataset_id, variables, year, month, day,
-                                      pressure_level, area, data_format, request_overrides)
         if cancel_requested():
             raise RuntimeError("下载已取消")
 
@@ -146,14 +148,21 @@ class CDSAdapter:
         if dest_path.exists():
             existing_size = dest_path.stat().st_size
 
-        if total_bytes > 0 and existing_size >= total_bytes:
+        if total_bytes > 0 and existing_size == total_bytes:
             _normalize_downloaded_file(dest_path)
             file_size = dest_path.stat().st_size
-            if file_size >= total_bytes:
+            if file_size == total_bytes:
                 emit_progress(
                     f"本地文件已完整，无需重复下载：{dest_path} ({_fmt_size(file_size)})"
                 )
                 return file_size
+
+        if total_bytes > 0 and existing_size > total_bytes:
+            # This is a stale/corrupt partial file from a different response;
+            # it must never be treated as a completed shorter request.
+            emit_progress("本地部分文件比当前远端文件大，已丢弃后重新下载。")
+            dest_path.unlink()
+            existing_size = 0
 
         if resume_from == 0 and existing_size > 0:
             resume_from = existing_size
@@ -174,6 +183,10 @@ class CDSAdapter:
             raise RuntimeError("下载已取消")
 
         file_size = dest_path.stat().st_size
+        if total_bytes > 0 and file_size < total_bytes:
+            raise RuntimeError(
+                f"下载文件不完整：已写入 {_fmt_size(file_size)}，预期至少 {_fmt_size(total_bytes)}"
+            )
         emit_progress(f"文件下载完成：{dest_path} ({_fmt_size(file_size)})")
         return file_size
 
@@ -240,13 +253,22 @@ class CDSAdapter:
     def _build_dest_path(
         dataset_id: str, variables: list[str], year: int, month: int,
         day: int | None, pressure_level: int | None, data_format: str,
+        *,
+        area: list[float] | None = None,
+        time: list[str] | None = None,
     ) -> Path:
         ext = ".grib" if data_format == "grib" else ".nc"
         pl_str = f"pl{pressure_level}" if pressure_level else "sfc"
         var_str = "_".join(variables)
         date_str = f"{year}{month:02d}{day:02d}" if day else f"{year}{month:02d}"
         ds_short = dataset_id.replace("reanalysis-", "").replace("derived-", "")
-        filename = f"cds_{ds_short}_{var_str}_{pl_str}_{date_str}{ext}"
+        qualifiers = []
+        if area:
+            qualifiers.append(f"area{'-'.join(_path_number(value) for value in area)}")
+        if time:
+            qualifiers.append(f"t{'-'.join(value.replace(':', '') for value in time)}")
+        qualifier = f"_{'_'.join(qualifiers)}" if qualifiers else ""
+        filename = f"cds_{ds_short}_{var_str}_{pl_str}_{date_str}{qualifier}{ext}"
         return Path(config_output_dir()) / filename
 
     def _build_request(
@@ -358,32 +380,54 @@ class CDSAdapter:
         known_total: int = 0,
     ) -> None:
         headers = {}
-        mode = "ab" if resume_from > 0 else "wb"
         if resume_from > 0:
             headers["Range"] = f"bytes={resume_from}-"
 
-        with dest.open(mode) as f:
-            with httpx.stream(
-                "GET",
-                url,
-                headers=headers,
-                timeout=DOWNLOAD_TIMEOUT,
-                follow_redirects=True,
-            ) as resp:
-                if resp.status_code not in (200, 206):
-                    resp.raise_for_status()
-                content_length = resp.headers.get("content-length")
-                total = int(content_length) if content_length else 0
-                if total == 0 and known_total > 0:
-                    total = known_total - resume_from
+        with httpx.stream(
+            "GET",
+            url,
+            headers=headers,
+            timeout=DOWNLOAD_TIMEOUT,
+            follow_redirects=True,
+        ) as resp:
+            if resp.status_code not in (200, 206):
+                resp.raise_for_status()
+
+            if resume_from > 0 and resp.status_code == 206:
+                content_range = resp.headers.get("content-range", "")
+                expected_prefix = f"bytes {resume_from}-"
+                if not content_range.lower().startswith(expected_prefix):
+                    raise RuntimeError(
+                        "服务器返回的断点续传范围与本地文件不一致，已保留原部分文件。"
+                    )
+                mode = "ab"
                 offset = resume_from
+            elif resume_from > 0:
+                # Some temporary URLs advertise Range support but answer a
+                # range request with a complete 200 response.  Appending that
+                # response would corrupt the NetCDF/HDF5 file, so restart the
+                # file from this known complete response instead.
+                emit_progress("远端未接受断点续传，已从本次完整响应重新下载。")
+                mode = "wb"
+                offset = 0
+            else:
+                mode = "wb"
+                offset = 0
+
+            content_length = resp.headers.get("content-length")
+            remaining = int(content_length) if content_length else 0
+            total = offset + remaining
+            if remaining == 0 and known_total > 0:
+                total = known_total
+
+            with dest.open(mode) as f:
                 for chunk in resp.iter_bytes(chunk_size=CHUNK_SIZE):
                     if cancel_requested():
                         raise RuntimeError("下载已取消")
                     f.write(chunk)
                     offset += len(chunk)
                     if on_progress and total > 0:
-                        on_progress(offset, resume_from + total)
+                        on_progress(offset, total)
 
 
 def config_output_dir() -> Path:
@@ -393,6 +437,13 @@ def config_output_dir() -> Path:
     config_path = cwd / "aero.yaml"
     cfg = AeroConfig.load(config_path) if config_path.exists() else AeroConfig.create_default()
     return cwd / cfg.output.data_dir
+
+
+def _path_number(value: float) -> str:
+    """Render a coordinate as a filesystem-safe, stable filename token."""
+    number = float(value)
+    rendered = str(int(number)) if number.is_integer() else f"{number:g}"
+    return rendered.replace("-", "m").replace(".", "p")
 
 
 # ── static helpers ─────────────────────────────────────────────────────

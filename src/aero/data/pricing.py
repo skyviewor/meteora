@@ -151,6 +151,8 @@ CONTEXT_WINDOWS: dict[str, int] = {
     "deepseek-v4-pro": 1_000_000,
     "qwen3.7-max": 1_000_000,
     "qwen3.7-plus": 1_000_000,
+    "qwen3.7-flash": 1_000_000,
+    "glm-5.2": 1_000_000,
     "qwen3.6-plus": 1_000_000,
     "qwen3.6-flash": 1_000_000,
     "qwen3.5-plus": 1_000_000,

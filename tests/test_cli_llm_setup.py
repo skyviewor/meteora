@@ -223,13 +223,17 @@ def test_detect_vision_setup_result():
 
 
 def test_all_builtin_models_have_explicit_context_windows():
-    models = {
-        model
-        for preset in BUILTIN_LLM_PROVIDERS.values()
+    provider_models = [
+        (provider, model)
+        for provider, preset in BUILTIN_LLM_PROVIDERS.items()
         for model in preset.models
-    }
+    ]
+    models = {model for _, model in provider_models}
 
-    assert len(models) == 12
+    # Model IDs are not globally unique: the same model may be provided by
+    # both its first-party endpoint and Model Studio.
+    assert len(provider_models) == 16
+    assert len(models) == 14
     assert all(context_window_for(model) is not None for model in models)
     assert context_window_for("qwen3.6-flash") == 1_000_000
 
@@ -276,6 +280,19 @@ def test_input_meta_migrates_legacy_deepseek_chat_to_flash(tmp_path, monkeypatch
     assert app.config.llm.model == "deepseek-v4-flash"
     assert "DeepSeek V4 Flash" in text
     assert "DeepSeek Chat" not in text
+
+
+def test_model_status_omits_duplicate_reused_vision_model():
+    config = AeroConfig.create_default()
+    config.llm.provider = "bailian"
+    config.llm.model = "qwen3.7-flash"
+    config.llm.supports_vision = True
+    config.llm.set_active_api_key("sk-test")
+    config.vision.mode = "reuse_primary"
+    app = AeroApp(config, persist_config=False)
+
+    assert app._input_meta_text().count("qwen3.7-flash") == 1
+    assert "视觉：" not in app._model_status_text(markup=False)
 
 
 @pytest.mark.asyncio

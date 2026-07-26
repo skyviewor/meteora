@@ -1,7 +1,8 @@
-"""LLM client with OpenAI-compatible API.
+"""LLM client for OpenAI-compatible providers and DashScope native search.
 
-Supports DeepSeek, OpenAI, Ollama, and any OpenAI-compatible endpoint.
-Includes both non-streaming and streaming (SSE) chat.
+Most providers use OpenAI-compatible Chat Completions.  Bailian models with
+native web search enabled use DashScope's native Generation API instead: that
+is the only route that returns the search sources/citation metadata.
 """
 
 import asyncio
@@ -27,6 +28,10 @@ _TRANSIENT_HTTP_ERRORS = (
     httpx.RemoteProtocolError,
     httpx.WriteError,
 )
+_DASHSCOPE_GENERATION_PATH = "/api/v1/services/aigc/text-generation/generation"
+_DASHSCOPE_MULTIMODAL_GENERATION_PATH = (
+    "/api/v1/services/aigc/multimodal-generation/generation"
+)
 
 
 def _first_choice(response: dict) -> dict:
@@ -47,11 +52,13 @@ class StreamEvent:
         content: str = "",
         tool_call: ToolCall | None = None,
         usage: dict | None = None,
+        references: list[str] | None = None,
     ):
-        self.type = type  # "text" | "tool_call" | "done"
+        self.type = type  # "text" | "tool_call" | "references" | "done"
         self.content = content
         self.tool_call = tool_call
         self.usage = usage
+        self.references = references or []
 
 
 @dataclass
@@ -61,6 +68,8 @@ class LLMConfig:
     reasoning_effort: str = ""
     api_key: str = ""
     base_url: str = ""
+    max_tokens: int | None = None
+    web_search_enabled: bool = False
 
     @property
     def endpoint(self) -> str:
@@ -81,18 +90,51 @@ class LLMConfig:
             return "https://api.moonshot.cn/v1/chat/completions"
         return self.base_url or "https://api.deepseek.com/v1/chat/completions"
 
+    def _dashscope_endpoint(self, path: str) -> str:
+        """Return a native DashScope endpoint while preserving a custom origin.
+
+        A custom Bailian OpenAI-compatible URL can be a regional endpoint.  In
+        that case preserve its origin/workspace prefix while replacing the
+        compatible-mode suffix with the native API path.
+        """
+        if self.base_url:
+            base = self.base_url.rstrip("/")
+            marker = "/compatible-mode"
+            if marker in base:
+                return base.split(marker, 1)[0] + path
+        return "https://dashscope.aliyuncs.com" + path
+
+    @property
+    def dashscope_generation_endpoint(self) -> str:
+        """Return DashScope's native text-generation endpoint."""
+        return self._dashscope_endpoint(_DASHSCOPE_GENERATION_PATH)
+
+    @property
+    def dashscope_multimodal_generation_endpoint(self) -> str:
+        """Return DashScope's native multimodal-generation endpoint."""
+        return self._dashscope_endpoint(_DASHSCOPE_MULTIMODAL_GENERATION_PATH)
+
 
 class LLMClient:
     def __init__(self, config: LLMConfig):
         self.config = config
         self._client = httpx.AsyncClient(timeout=120)
         self.last_usage: dict | None = None
+        self.last_search_references: list[str] = []
 
     async def close(self):
         await self._client.aclose()
 
     async def chat(self, messages: list[Message]) -> str:
         """Send messages to LLM and return text response."""
+        if self._uses_dashscope_native_search():
+            chunks: list[str] = []
+            async for event in self._dashscope_stream(messages, tools=None):
+                if event.type == "text":
+                    chunks.append(event.content)
+                elif event.type == "done":
+                    self.last_usage = event.usage
+            return "".join(chunks)
         response = await self._send(messages, tools=None)
         self.last_usage = response.get("usage")
         choice = _first_choice(response)
@@ -100,6 +142,11 @@ class LLMClient:
 
     async def chat_stream(self, messages: list[Message]) -> AsyncGenerator[StreamEvent, None]:
         """Stream text tokens from LLM."""
+        if self._uses_dashscope_native_search():
+            async for event in self._dashscope_stream(messages, tools=None):
+                yield event
+            return
+        self.last_search_references = []
         headers = self._headers()
         body = self._request_body(messages, stream=True)
 
@@ -145,6 +192,17 @@ class LLMClient:
         self, messages: list[Message], tools: list[dict]
     ) -> tuple[str, list[ToolCall]]:
         """Send messages to LLM with tool definitions, return text + tool calls."""
+        if self._uses_dashscope_native_search():
+            chunks: list[str] = []
+            tool_calls: list[ToolCall] = []
+            async for event in self._dashscope_stream(messages, tools=tools):
+                if event.type == "text":
+                    chunks.append(event.content)
+                elif event.type == "tool_call" and event.tool_call is not None:
+                    tool_calls.append(event.tool_call)
+                elif event.type == "done":
+                    self.last_usage = event.usage
+            return "".join(chunks), tool_calls
         response = await self._send(messages, tools=tools)
         self.last_usage = response.get("usage")
         choice = _first_choice(response)
@@ -173,6 +231,12 @@ class LLMClient:
         Yields StreamEvent with type "text" for tokens, "tool_call" for tool calls,
         and "done" when the stream ends.
         """
+        if self._uses_dashscope_native_search():
+            async for event in self._dashscope_stream(messages, tools=tools):
+                yield event
+            return
+
+        self.last_search_references = []
         headers = self._headers()
         body = self._request_body(messages, tools=tools, stream=True)
 
@@ -292,19 +356,63 @@ class LLMClient:
             "Accept-Encoding": "identity",
         }
 
+    def _dashscope_headers(self, *, stream: bool = False) -> dict:
+        headers = self._headers()
+        if stream:
+            # DashScope native streaming is enabled through this HTTP header,
+            # not an OpenAI ``stream`` field in the request body.
+            headers["X-DashScope-SSE"] = "enable"
+        return headers
+
+    def _uses_dashscope_native_search(self) -> bool:
+        """Whether this request needs DashScope native search/source support."""
+        if not (self.config.provider == "bailian" and self.config.web_search_enabled):
+            return False
+        from aero.data.web_search import bailian_native_search_supported
+
+        return bailian_native_search_supported(self.config.model)
+
+    def _uses_dashscope_multimodal_search(self) -> bool:
+        """Whether the current native-search call needs the multimodal API."""
+        if not self._uses_dashscope_native_search():
+            return False
+        from aero.data.web_search import bailian_native_search_uses_multimodal_generation
+
+        return bailian_native_search_uses_multimodal_generation(self.config.model)
+
+    def _dashscope_native_endpoint(self) -> str:
+        if self._uses_dashscope_multimodal_search():
+            return self.config.dashscope_multimodal_generation_endpoint
+        return self.config.dashscope_generation_endpoint
+
     async def _send(
         self, messages: list[Message], tools: list[dict] | None
     ) -> dict:
-        headers = self._headers()
-        body = self._request_body(messages, tools=tools, stream=False)
+        native_search = self._uses_dashscope_native_search()
+        if not native_search:
+            self.last_search_references = []
+        headers = self._dashscope_headers() if native_search else self._headers()
+        body = (
+            self._dashscope_request_body(messages, tools=tools)
+            if native_search
+            else self._request_body(messages, tools=tools, stream=False)
+        )
+        endpoint = (
+            self._dashscope_native_endpoint() if native_search else self.config.endpoint
+        )
 
         logger.info("llm.request", model=self.config.model, tool_count=len(tools or []))
 
         for attempt in range(_TRANSIENT_RETRIES + 1):
             try:
-                resp = await self._client.post(self.config.endpoint, json=body, headers=headers)
+                resp = await self._client.post(endpoint, json=body, headers=headers)
                 _raise_for_status(resp)
-                return resp.json()
+                response = resp.json()
+                if native_search:
+                    _raise_dashscope_payload_error(response)
+                    self.last_search_references = _dashscope_reference_urls(response)
+                    return _dashscope_to_openai_response(response)
+                return response
             except _TRANSIENT_HTTP_ERRORS as e:
                 if attempt < _TRANSIENT_RETRIES:
                     logger.warning("llm.request.retry", error=repr(e), attempt=attempt + 1)
@@ -324,6 +432,8 @@ class LLMClient:
             "messages": [self._format_msg(m) for m in messages],
             "stream": stream,
         }
+        if self.config.max_tokens is not None:
+            body["max_tokens"] = self.config.max_tokens
         if stream:
             body["stream_options"] = {"include_usage": True}
         if self.config.reasoning_effort:
@@ -332,6 +442,223 @@ class LLMClient:
             body["tools"] = tools
             body["tool_choice"] = "auto"
         return body
+
+    def _dashscope_request_body(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        *,
+        stream: bool = False,
+    ) -> dict:
+        """Build a DashScope Generation request with model-side web search.
+
+        ``enable_source`` lets Aero turn the provider's source URLs into the
+        normal in-app reference section.  Search remains model-driven: no
+        force-search switch is sent, so ordinary offline questions do not
+        incur a web-search call.
+        """
+        multimodal = self._uses_dashscope_multimodal_search()
+        search_options: dict = {
+            "search_strategy": "agent" if multimodal else "turbo",
+            "enable_source": True,
+        }
+        if not multimodal:
+            # These features are supported by the text-generation search
+            # protocol.  The multimodal ``agent`` strategy only supports
+            # returning sources, so do not send unsupported options there.
+            search_options.update(
+                {
+                    "enable_citation": True,
+                    "citation_format": "[ref_<number>]",
+                }
+            )
+        parameters: dict = {
+            "result_format": "message",
+            "enable_search": True,
+            "search_options": search_options,
+        }
+        if stream:
+            # DashScope uses this parameter (in addition to the SSE header)
+            # to emit incremental Generation chunks.  Without it some
+            # gateways finish a request as a normal/empty response, which the
+            # generic SSE reader cannot turn into assistant text.
+            parameters["incremental_output"] = True
+        if self.config.max_tokens is not None:
+            parameters["max_tokens"] = self.config.max_tokens
+        if tools:
+            # In DashScope native Generation, function tools live under
+            # ``parameters`` rather than at the OpenAI request top level.
+            parameters["tools"] = tools
+            parameters["tool_choice"] = "auto"
+        return {
+            "model": self.config.model,
+            "input": {
+                "messages": [
+                    self._format_dashscope_message(m, multimodal=multimodal)
+                    for m in messages
+                ]
+            },
+            "parameters": parameters,
+        }
+
+    async def _dashscope_stream(
+        self, messages: list[Message], tools: list[dict] | None
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Normalize native DashScope SSE into the application's stream API."""
+        body = self._dashscope_request_body(messages, tools=tools, stream=True)
+        headers = self._dashscope_headers(stream=True)
+        logger.info(
+            "llm.dashscope_native_stream",
+            model=self.config.model,
+            tool_count=len(tools or []),
+            endpoint=self._dashscope_native_endpoint(),
+            multimodal=self._uses_dashscope_multimodal_search(),
+        )
+
+        for attempt in range(_TRANSIENT_RETRIES + 1):
+            emitted = False
+            captured_usage: dict | None = None
+            content_so_far = ""
+            tool_calls: dict[int, dict] = {}
+            sent_references: set[str] = set()
+            saw_model_output = False
+            raw_response_lines: list[str] = []
+
+            def process_payload(payload: object) -> tuple[list[str], str]:
+                """Consume one native SSE packet or a non-SSE JSON response."""
+                nonlocal captured_usage, content_so_far, saw_model_output
+                if not isinstance(payload, dict):
+                    return [], ""
+
+                _raise_dashscope_payload_error(payload)
+                output = payload.get("output")
+                if not isinstance(output, dict):
+                    return [], ""
+                saw_model_output = True
+
+                usage = payload.get("usage") or output.get("usage")
+                if isinstance(usage, dict):
+                    captured_usage = usage
+
+                urls = _dashscope_reference_urls(payload)
+                new_urls = [url for url in urls if url not in sent_references]
+                if new_urls:
+                    sent_references.update(new_urls)
+
+                message = _dashscope_message(payload)
+                content = message.get("content") if isinstance(message, dict) else ""
+                if isinstance(content, list):
+                    content = "".join(
+                        item.get("text", "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+
+                delta = ""
+                if isinstance(content, str) and content:
+                    # Native SSE may send increments or accumulated text,
+                    # depending on the model/version.  Normalize both.
+                    if content.startswith(content_so_far):
+                        delta = content[len(content_so_far) :]
+                        content_so_far = content
+                    elif content != content_so_far:
+                        delta = content
+                        content_so_far += content
+
+                for index, raw_call in enumerate(
+                    message.get("tool_calls", []) if isinstance(message, dict) else []
+                ):
+                    _merge_dashscope_tool_call(tool_calls, index, raw_call)
+                return new_urls, delta
+
+            try:
+                async with self._client.stream(
+                    "POST",
+                    self._dashscope_native_endpoint(),
+                    json=body,
+                    headers=headers,
+                ) as response:
+                    await _raise_for_status_stream(response)
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.startswith("data:"):
+                            raw = line.split(":", 1)[1].strip()
+                            if raw == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                        elif line.startswith(("id:", "event:", "retry:", ":")):
+                            continue
+                        else:
+                            # A native request can fail with HTTP 200 and a
+                            # regular JSON error body instead of SSE.  Keep it
+                            # so it can become a visible diagnostic below,
+                            # rather than silently completing with no answer.
+                            raw_response_lines.append(line)
+                            continue
+
+                        new_urls, delta = process_payload(data)
+                        if new_urls:
+                            yield StreamEvent(type="references", references=new_urls)
+                        if delta:
+                            emitted = True
+                            yield StreamEvent(type="text", content=delta)
+
+                    if raw_response_lines:
+                        try:
+                            raw_payload = json.loads("\n".join(raw_response_lines))
+                        except json.JSONDecodeError as e:
+                            raise RuntimeError(
+                                "阿里云百炼联网搜索返回了无法解析的响应，请稍后重试。"
+                            ) from e
+                        new_urls, delta = process_payload(raw_payload)
+                        if new_urls:
+                            yield StreamEvent(type="references", references=new_urls)
+                        if delta:
+                            emitted = True
+                            yield StreamEvent(type="text", content=delta)
+
+                    # Some DashScope gateways close a completed SSE response
+                    # without a literal ``[DONE]`` marker.  Treat a clean EOF
+                    # as completion, but never present an empty response as a
+                    # successful answer.
+                    self.last_usage = captured_usage
+                    self.last_search_references = list(sent_references)
+                    completed_calls: list[ToolCall] = []
+                    for index in sorted(tool_calls):
+                        call = _dashscope_tool_call(tool_calls[index], index)
+                        if call is not None:
+                            completed_calls.append(call)
+                    if not emitted and not completed_calls:
+                        if saw_model_output:
+                            raise RuntimeError(
+                                "阿里云百炼联网搜索未返回生成内容，请稍后重试；"
+                                "如果持续出现，请检查模型是否支持联网搜索和账户状态。"
+                            )
+                        raise RuntimeError(
+                            "阿里云百炼联网搜索未返回有效响应，请稍后重试；"
+                            "如果持续出现，请检查模型是否支持联网搜索和账户状态。"
+                        )
+                    for call in completed_calls:
+                        emitted = True
+                        yield StreamEvent(type="tool_call", tool_call=call)
+                    yield StreamEvent(type="done", usage=captured_usage)
+                    return
+            except _TRANSIENT_HTTP_ERRORS as e:
+                if emitted:
+                    raise _stream_interrupted_error(e) from e
+                if attempt < _TRANSIENT_RETRIES:
+                    logger.warning(
+                        "llm.dashscope_native_stream.retry",
+                        error=repr(e),
+                        attempt=attempt + 1,
+                    )
+                    await asyncio.sleep(0.8 * (attempt + 1))
+                    continue
+                raise _connection_error(e) from e
 
     @staticmethod
     def _format_msg(m: Message) -> dict:
@@ -355,6 +682,128 @@ class LLMClient:
                 for tc in m.tool_calls
             ]
         return msg
+
+    @classmethod
+    def _format_dashscope_message(cls, m: Message, *, multimodal: bool) -> dict:
+        """Format a message for the selected native DashScope protocol."""
+        msg = cls._format_msg(m)
+        if multimodal and isinstance(msg.get("content"), str):
+            # The multimodal-generation endpoint requires each content part to
+            # be typed, even for a text-only user turn.
+            msg["content"] = [{"text": msg["content"]}]
+        return msg
+
+
+def _dashscope_message(response: dict) -> dict:
+    """Read a native Generation message without assuming an SSE shape."""
+    output = response.get("output")
+    if not isinstance(output, dict):
+        return {}
+    choices = output.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        return message if isinstance(message, dict) else {}
+    message = output.get("message")
+    return message if isinstance(message, dict) else {}
+
+
+def _raise_dashscope_payload_error(response: object) -> None:
+    """Turn DashScope's HTTP-200 error payloads into visible failures.
+
+    DashScope can return a structured error in a successful HTTP response.  If
+    it is ignored, the stream ends with no text and the chat UI appears stuck.
+    A normal response contains ``output``; anything else with an error code or
+    message is actionable and must be surfaced immediately.
+    """
+    if not isinstance(response, dict) or isinstance(response.get("output"), dict):
+        return
+
+    error = response.get("error")
+    code = response.get("code")
+    message = response.get("message")
+    if isinstance(error, dict):
+        code = code or error.get("code") or error.get("type")
+        message = message or error.get("message")
+    elif isinstance(error, str):
+        message = message or error
+
+    if not code and not message:
+        return
+    request_id = response.get("request_id") or response.get("requestId")
+    suffix = f"（请求 ID：{request_id}）" if request_id else ""
+    detail = str(message or code).strip()[:500]
+    raise RuntimeError(f"阿里云百炼联网搜索请求失败：{detail}{suffix}")
+
+
+def _dashscope_to_openai_response(response: dict) -> dict:
+    """Adapt native Generation output to the established client contract."""
+    output = response.get("output")
+    output_dict = output if isinstance(output, dict) else {}
+    usage = response.get("usage") or output_dict.get("usage")
+    return {"choices": [{"message": _dashscope_message(response)}], "usage": usage}
+
+
+def _dashscope_reference_urls(response: dict) -> list[str]:
+    """Extract source URLs returned by DashScope native web search."""
+    output = response.get("output")
+    if not isinstance(output, dict):
+        return []
+    info = output.get("search_info")
+    if not isinstance(info, dict):
+        return []
+    results = info.get("search_results")
+    if not isinstance(results, list):
+        return []
+    urls: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        url = result.get("url") or result.get("source_url")
+        if isinstance(url, str) and url.startswith(("https://", "http://")):
+            urls.append(url)
+    return list(dict.fromkeys(urls))
+
+
+def _merge_dashscope_tool_call(
+    buffer: dict[int, dict], index: int, raw_call: object
+) -> None:
+    """Merge native streaming tool call chunks defensively."""
+    if not isinstance(raw_call, dict):
+        return
+    current = buffer.setdefault(
+        index,
+        {"id": "", "function": {"name": "", "arguments": ""}},
+    )
+    if raw_call.get("id"):
+        current["id"] = raw_call["id"]
+    function = raw_call.get("function")
+    if not isinstance(function, dict):
+        function = raw_call
+    name = function.get("name")
+    arguments = function.get("arguments")
+    if isinstance(name, str):
+        current_name = current["function"]["name"]
+        current["function"]["name"] = (
+            name if name.startswith(current_name) else current_name + name
+        )
+    if isinstance(arguments, dict):
+        arguments = json.dumps(arguments, ensure_ascii=False)
+    if isinstance(arguments, str):
+        current_args = current["function"]["arguments"]
+        current["function"]["arguments"] = (
+            arguments if arguments.startswith(current_args) else current_args + arguments
+        )
+
+
+def _dashscope_tool_call(raw_call: dict, index: int) -> ToolCall | None:
+    function = raw_call.get("function")
+    if not isinstance(function, dict) or not function.get("name"):
+        return None
+    return ToolCall(
+        id=str(raw_call.get("id") or f"call_{index}"),
+        name=str(function["name"]),
+        arguments=_parse_args(function.get("arguments", "")),
+    )
 
 
 def _parse_args(arguments: str | dict) -> dict:

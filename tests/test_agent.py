@@ -199,6 +199,10 @@ def test_build_system_prompt():
     assert "检查这个数据的内容" in prompt
     assert "不要先写 Python/xarray 脚本" in prompt
     assert "必须先查询统一数据集目录" in prompt
+    assert "两步式凭证流程" in prompt
+    assert "不要把两行内容发到聊天框" in prompt
+    assert "准备好了" in prompt
+    assert "不得" in prompt
     assert "download_tool 为唯一事实来源" in prompt
     assert "不要依赖系统提示中的静态名单" in prompt
     assert "NCEP Reanalysis 变量优先通过统一数据集变量查询能力确认" in prompt
@@ -220,7 +224,7 @@ def test_build_system_prompt():
     assert "参考资料" in prompt
     assert "source_url" in prompt
     assert "引用参考文献" in prompt
-    assert "原样粘贴页面上的两行官方配置" in prompt
+    assert "复制页面显示的两行官方配置" in prompt
     assert "禁止猜测、查找、cat、read_file 或用 Python 读取 Aero 密钥文件" in prompt
     assert "SST 自动换成 TMP:surface" in prompt
     assert "analyze_image" in prompt
@@ -245,6 +249,14 @@ def test_build_system_prompt():
     assert "没有源切换" in prompt
     assert "CDS" in prompt
     assert "subset_netcdf" in prompt
+    assert "## 意图消歧（最高优先级）" in prompt
+    assert "必须停止并先问一个简短的确认问题" in prompt
+    assert "确认前不得调用工具" in prompt
+    assert "“配置网络搜索”应理解为配置网页搜索" in prompt
+    assert "绝不能解释成站点/site 数据" in prompt
+    assert "完整展示“阿里云百炼”和“智谱 AI”两条方案" in prompt
+    assert "前 2000 次调用免费" in prompt
+    assert "29 元/千次" in prompt
 
 
 def test_build_system_prompt_prefers_tools_in_english():
@@ -297,6 +309,14 @@ def test_build_system_prompt_prefers_tools_in_english():
     assert "No AWS, no GCS, no source switching" in prompt
     assert "CDS" in prompt
     assert "subset_netcdf" in prompt
+    assert "## Intent disambiguation (HIGH PRIORITY)" in prompt
+    assert "STOP and ask one short clarification question first" in prompt
+    assert "Do not call any tool" in prompt
+    assert "“配置网络搜索” means configure web search" in prompt
+    assert "does NOT mean station/site data" in prompt
+    assert "ALWAYS present both complete alternatives" in prompt
+    assert "first 2,000 calls are free" in prompt
+    assert "CNY 29 per 1,000 calls" in prompt
 
 
 def test_build_system_prompt_injects_selected_skill_context():
@@ -677,10 +697,23 @@ def test_stderr_display_distinguishes_logs_from_errors():
         "命令日志：2026-06-12 23:39:30,326 INFO status has been updated to running"
     )
     assert _display_status_line("stderr: Download completed!") == "命令日志：Download completed!"
+    assert _display_status_line(
+        "stderr: findfont: Failed to find font weight bold, now using 400."
+    ) == "命令日志：findfont: Failed to find font weight bold, now using 400."
     assert _display_status_line("stderr: Traceback (most recent call last):").startswith("错误输出：")
     assert _display_status_line("stderr: /bin/bash: mamba: No such file or directory").startswith(
         "错误输出："
     )
+
+
+def test_plot_validation_uses_specific_progress_label():
+    from aero.agent.loop import _tool_error_progress_message
+
+    assert _tool_error_progress_message(
+        "run_shell",
+        {"command": "python plot.py"},
+        {"status": "error", "scientific_plot_validation_failed": True},
+    ) == "绘图脚本检查未通过"
 
 
 def test_reference_injection_uses_markdown_text_links():
@@ -954,6 +987,24 @@ async def test_download_progress_reports_fractional_start():
     assert "(5.0 MB / 619.0 MB)" in message
 
 
+def test_download_progress_resets_speed_measurement_for_resume(monkeypatch):
+    from aero.toolbox import download_progress
+
+    messages: list[str] = []
+    clock = iter((1.0, 100.0, 101.0))
+    monkeypatch.setattr(download_progress.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(download_progress, "emit_progress", messages.append)
+
+    report = download_progress.download_progress_reporter()
+    report(10 * 1024 * 1024, 249 * 1024 * 1024, force=True)
+    report(211 * 1024 * 1024, 249 * 1024 * 1024, force=True, reset_measurement=True)
+    report(213 * 1024 * 1024, 249 * 1024 * 1024)
+
+    assert "速度测量中 ETA 估算中" in messages[1]
+    assert "2.0 MB/s" in messages[2]
+    assert "ETA 18s" in messages[2]
+
+
 def test_direct_tool_response_preserves_vision_setup_message():
     from aero.agent.loop import _direct_tool_response
 
@@ -1003,6 +1054,24 @@ async def test_agent_blocks_repeated_and_excessive_vision_analysis(tmp_path):
         )
     finally:
         await agent.close()
+
+
+def test_native_bailian_search_never_exposes_or_executes_external_search():
+    from aero.agent.loop import AgentLoop
+    from aero.toolbox import builtin_tools  # noqa: F401
+
+    config = AeroConfig.create_default()
+    config.llm.provider = "bailian"
+    config.llm.model = "qwen3.7-flash"
+    config.web_search.enabled = True
+    agent = AgentLoop(config)
+
+    allowed = {tool["function"]["name"] for tool in agent._allowed_tools()}
+    assert "search_web" not in allowed
+    assert "已阻止外部网页搜索调用" in (
+        agent._external_web_search_block_reason("search_web") or ""
+    )
+    assert agent._external_web_search_block_reason("search_literature") is None
 
 
 def test_agent_applies_llm_config_update(tmp_path, monkeypatch):

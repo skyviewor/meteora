@@ -86,7 +86,17 @@ Compatibility notes:
 
 Useful `MapPolygon` methods:
 
-- `map_polygon.get_extent(buffer=...)` for `ax.set_extent(...)`
+- `map_polygon.bounds` for a fast raw `(west, south, east, north)` envelope.
+- For a padded plotting extent, prefer raw bounds plus numeric padding. Do **not** use `map_polygon.get_extent(buffer=...)` for complex foreign boundaries: it calls a geometric `buffer(...)` before calculating bounds and can be extremely slow.
+
+  ```python
+  west, south, east, north = map_polygon.bounds
+  padding = 2.0  # degrees; choose deliberately for the requested map
+  extent = (west - padding, east + padding, south - padding, north + padding)
+  ax.set_extent(extent, crs=ccrs.PlateCarree())
+  ```
+
+  If `get_extent()` times out, do not retry it unchanged; use this raw-bounds pattern.
 - `map_polygon.make_mask_array(lons, lats)` to build a raster mask
 - `map_polygon.maskout(lons, lats, data)` to mask raster-like data
 - `map_polygon.to_file(path, engine="GeoJSON")` to export GeoJSON or Shapefile output

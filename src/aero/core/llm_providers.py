@@ -17,6 +17,26 @@ class LLMProviderPreset:
 
 
 BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
+    "bailian": LLMProviderPreset(
+        id="bailian",
+        name="阿里云百炼",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        default_model="qwen3.7-plus",
+        models=(
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.7-flash",
+            "qwen3.6-plus",
+            "qwen3.6-flash",
+            "qwen3.5-plus",
+            "qwen3.5-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "glm-5.2",
+        ),
+        api_key_url="https://bailian.console.aliyun.com/cn-beijing/?apiKey=1&tab=globalset#/efm/api_key",
+        api_key_hint="打开阿里云百炼控制台，在 API-KEY 管理页面创建并复制 DashScope API key。",
+    ),
     "deepseek": LLMProviderPreset(
         id="deepseek",
         name="DeepSeek",
@@ -28,22 +48,6 @@ BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
         ),
         api_key_url="https://platform.deepseek.com/api_keys",
         api_key_hint="打开 DeepSeek 开放平台，在 API keys 页面创建并复制 sk- 开头的 key。",
-    ),
-    "bailian": LLMProviderPreset(
-        id="bailian",
-        name="阿里云百炼",
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        default_model="qwen3.7-plus",
-        models=(
-            "qwen3.7-max",
-            "qwen3.7-plus",
-            "qwen3.6-plus",
-            "qwen3.6-flash",
-            "qwen3.5-plus",
-            "qwen3.5-flash",
-        ),
-        api_key_url="https://bailian.console.aliyun.com/cn-beijing/?apiKey=1&tab=globalset#/efm/api_key",
-        api_key_hint="打开阿里云百炼控制台，在 API-KEY 管理页面创建并复制 DashScope API key。",
     ),
     "kimi": LLMProviderPreset(
         id="kimi",
@@ -75,6 +79,10 @@ MODEL_METADATA: dict[tuple[str, str], ModelMetadata] = {
     ("deepseek", "deepseek-v4-pro"): ModelMetadata("文本 · 旗舰"),
     ("bailian", "qwen3.7-max"): ModelMetadata("文本 · 旗舰"),
     ("bailian", "qwen3.7-plus"): ModelMetadata("多模态 · 均衡", supports_vision=True),
+    ("bailian", "qwen3.7-flash"): ModelMetadata("多模态 · 轻量", supports_vision=True),
+    ("bailian", "deepseek-v4-pro"): ModelMetadata("文本 · 高质量"),
+    ("bailian", "deepseek-v4-flash"): ModelMetadata("文本 · 轻量"),
+    ("bailian", "glm-5.2"): ModelMetadata("文本 · 高质量"),
     ("bailian", "qwen3.6-plus"): ModelMetadata("多模态 · 高质量", supports_vision=True),
     ("bailian", "qwen3.6-flash"): ModelMetadata("多模态 · 低成本", supports_vision=True),
     ("bailian", "qwen3.5-plus"): ModelMetadata("多模态 · 旧版", supports_vision=True),

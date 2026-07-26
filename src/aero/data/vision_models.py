@@ -6,6 +6,7 @@ VISION_MODELS = [
     ("qwen3.6-flash", "Qwen3.6 Flash"),
     ("qwen3.6-plus", "Qwen3.6 Plus"),
     ("qwen3.7-plus", "Qwen3.7 Plus"),
+    ("qwen3.7-flash", "Qwen3.7 Flash"),
     ("qwen3-vl-plus", "Qwen3-VL Plus"),
     ("qwen3-vl-flash", "Qwen3-VL Flash"),
     ("qwen-vl-max", "Qwen-VL Max"),

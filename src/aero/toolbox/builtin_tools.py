@@ -24,9 +24,11 @@ from aero.toolbox.tools.datasets import (
     search_datasets,
 )
 from aero.toolbox.tools.configuration import (
+    authorize_web_search_key_reuse,
     check_ads_config,
     check_cds_config,
     check_earthdata_config,
+    check_web_search_config,
     clear_ads_config,
     clear_cds_config,
     clear_earthdata_config,
@@ -227,6 +229,7 @@ __all__ = [
     "list_downloads",
     "list_checkpoints",
     "launch_sub_agent",
+    "authorize_web_search_key_reuse",
     "list_llm_providers",
     "list_figures",
     "list_files",

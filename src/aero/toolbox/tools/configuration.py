@@ -9,10 +9,12 @@ from aero.core.config import (
     clear_cds_credentials,
     clear_earthdata_token,
     clear_llm_api_key,
+    resolved_vision_config,
     save_ads_credentials,
     save_cds_credentials,
     save_earthdata_token,
     save_llm_profile,
+    save_web_search_api_key,
     user_secrets_path,
 )
 from aero.core.llm_providers import (
@@ -56,7 +58,305 @@ async def request_secret_input(
     """Request a secret through the client UI and return only a handle."""
     return await request_secret_input_from_context(
         SecretInputRequest(scope, title, instructions, multiline)
+)
+
+
+def _web_search_reuse_sources(config: AeroConfig, provider: str) -> list[str]:
+    """Return model roles with a reusable same-provider key, without exposing it."""
+    provider = normalize_provider_id(provider)
+    sources: list[str] = []
+    for saved_provider, profile in config.llm.providers.items():
+        if normalize_provider_id(saved_provider) == provider and profile.api_key:
+            sources.append("已配置的主模型供应商")
+            break
+    vision = resolved_vision_config(config)
+    if (
+        vision is not None
+        and normalize_provider_id(vision.provider) == provider
+        and vision.api_key
+        and "已配置的视觉模型" not in sources
+    ):
+        sources.append("已配置的视觉模型")
+    return sources
+
+
+def _web_search_reuse_candidate(config: AeroConfig, provider: str) -> str:
+    """Resolve a same-provider key only after the caller obtained authorization."""
+    provider = normalize_provider_id(provider)
+    for saved_provider, profile in config.llm.providers.items():
+        if normalize_provider_id(saved_provider) == provider and profile.api_key:
+            return profile.api_key
+    vision = resolved_vision_config(config)
+    if (
+        vision is not None
+        and normalize_provider_id(vision.provider) == provider
+        and vision.api_key
+    ):
+        return vision.api_key
+    return ""
+
+
+def _save_web_search_credential(value: str) -> dict:
+    """Consume a web-search-only key from the local secure input window."""
+    key = value.strip()
+    if not key:
+        return {"status": "error", "message": "网页搜索 API Key 不能为空。"}
+    config = find_config()
+    provider = (config.web_search.provider or "bailian").strip().lower()
+    if provider not in {"bailian", "zhipu"}:
+        return {"status": "error", "message": f"不支持的网页搜索服务商：{provider}"}
+    save_web_search_api_key(
+        key,
+        config.web_search.base_url,
+        provider=provider,
+        model=config.web_search.model,
     )
+    config.web_search.api_key = key
+    config.web_search.enabled = False
+    config.web_search.mcp_verified = False
+    config.save(find_config_path())
+    return {
+        "status": "success",
+        "provider": provider,
+        "api_key_configured": True,
+        "mcp_verified": False,
+        "message": "网页搜索服务 API Key 已保存在用户级凭据中；尚未启用，请执行 /websearch on 进行连通性测试。",
+    }
+
+
+register_credential_spec(
+    CredentialSpec(
+        scope="web_search",
+        title="输入网页搜索服务 API Key",
+        instructions=(
+            "这里只输入当前所选网页搜索供应商的 API Key。\n"
+            "如需复用同一供应商已配置的 Key，必须先获得用户明确授权；不要自行复用。\n"
+            "使用百炼时，还必须在百炼 MCP 广场手动开通 WebSearch（联网搜索）MCP。\n"
+            "密钥只在本地保存，不会进入对话，也不会发送给模型。"
+        ),
+        multiline=False,
+        consumer=_save_web_search_credential,
+    )
+)
+
+
+@register_tool(
+    name="check_web_search_config",
+    description=(
+        "检查网页搜索凭证状态，并返回百炼与智谱两种完整配置方法。"
+        "用户要配置或修复网页搜索时调用；不要调用主模型 provider 配置工具，"
+        "也不要在未经用户明确授权时自动复用模型 API Key。"
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+def check_web_search_config() -> dict:
+    config = find_config()
+    provider = (config.web_search.provider or "bailian").strip().lower()
+    if provider == "zhipu":
+        name = "智谱 AI"
+    else:
+        provider = "bailian"
+        name = "阿里云百炼"
+    bailian_url = (
+        "https://bailian.console.aliyun.com/cn-beijing/"
+        "?apiKey=1&tab=globalset#/efm/api_key"
+    )
+    zhipu_url = "https://open.bigmodel.cn/apikey/platform"
+    bailian_pricing_url = "https://help.aliyun.com/zh/model-studio/web-search-mcp"
+    zhipu_pricing_url = "https://docs.bigmodel.cn/cn/guide/tools/web-search"
+    configured = bool(config.web_search.api_key)
+    bailian_reuse_sources = _web_search_reuse_sources(config, "bailian")
+    zhipu_reuse_sources = _web_search_reuse_sources(config, "zhipu")
+    reuse_available = {
+        "bailian": bool(bailian_reuse_sources),
+        "zhipu": bool(zhipu_reuse_sources),
+    }
+    if configured:
+        configuration_state = "configured"
+    elif any(reuse_available.values()):
+        configuration_state = "reusable_key_available"
+    else:
+        configuration_state = "credential_required"
+    reuse_guidance = ""
+    if bailian_reuse_sources:
+        reuse_guidance += (
+            "\n检测到用户已经配置过百炼 API Key，可以复用，无需重新创建或输入。"
+            "请把“明确授权复用现有百炼 API Key”作为百炼方案的首选项，"
+            "并提醒用户仍需到百炼 MCP 广场开通 WebSearch（联网搜索）MCP。"
+            "只有用户明确回复同意/授权复用后，才能调用 "
+            "authorize_web_search_key_reuse(provider=\"bailian\")；不得自动复用。\n"
+        )
+    if zhipu_reuse_sources:
+        reuse_guidance += (
+            "\n检测到用户已经配置过智谱 API Key，可以复用，无需重新输入。"
+            "只有用户明确回复同意/授权复用后，才能调用 "
+            "authorize_web_search_key_reuse(provider=\"zhipu\")；不得自动复用。\n"
+        )
+    return {
+        "provider": provider,
+        "configuration_state": configuration_state,
+        "api_key_configured": configured,
+        "dedicated_web_search_key_configured": configured,
+        "reusable_model_api_key_detected": any(reuse_available.values()),
+        "mcp_verified": bool(config.web_search.mcp_verified),
+        "message": (
+            (
+                f"当前选择的网页搜索供应商：{name}；网页搜索专用 Key 已配置。\n\n"
+                if configured
+                else (
+                    "已检测到可复用的模型 API Key；不要再要求用户创建或输入同一"
+                    "供应商的 Key。必须先说明可复用并取得用户明确授权。\n\n"
+                    if any(reuse_available.values())
+                    else f"当前选择的网页搜索供应商：{name}；尚无网页搜索凭证。\n\n"
+                )
+            )
+            +
+            "可选配置方法：\n"
+            "1. 阿里云百炼 WebSearch MCP\n"
+            f"   - 在 API-KEY 管理页创建或复制 DashScope API Key：{bailian_url}\n"
+            "   - 登录百炼后进入 MCP 广场，搜索“WebSearch”或“联网搜索”，"
+            "点击“立即开通”，再“确认开通”。\n"
+            "   - API Key 和 MCP 服务开通两项缺一不可；同时检查账户余额和调用额度。\n"
+            "   - 计费：全部用户前 2000 次调用免费；免费额度用尽后按 "
+            "29 元/千次计费。价格可能调整，以阿里云官方计费页面为准。\n"
+            "   - 如果要复用已配置的百炼 Key，必须由用户明确授权，系统不能自动复用。\n\n"
+            "2. 智谱 AI 搜索\n"
+            f"   - 在开放平台创建或复制 API Key：{zhipu_url}\n"
+            "   - 无需开通百炼 MCP；请检查智谱账户余额和搜索调用额度。\n"
+            "   - 计费（按搜索请求次数，不是按 token）：search_std 0.01 元/次；"
+            "search_pro 0.03 元/次；search_pro_sogou、search_pro_quark 均为 0.05 元/次。"
+            "Aero 默认使用 search_std。价格可能调整，以智谱官方联网搜索定价页为准。\n"
+            "   - 如果要复用已配置的智谱 Key，同样必须由用户明确授权。\n\n"
+            "如果尚未选定供应商，请先让用户选择百炼或智谱（也可执行 "
+            "/websearch provider）。拿到 Key 后不要粘贴到聊天框；"
+            "只回复“准备好了”，再打开本地安全输入窗口。"
+            "\n无论是否检测到可复用的百炼 Key，都必须在同一条回复中完整展示"
+            "“阿里云百炼”和“智谱 AI”两条方案，让用户自己选择；"
+            "可复用百炼 Key 只能让百炼成为推荐方案，不能隐藏智谱方案。"
+            + reuse_guidance
+        ),
+        "response_requirements": [
+            "始终同时展示阿里云百炼与智谱 AI 两条完整方案",
+            "检测到百炼 Key 时可把百炼标为推荐，但不得省略智谱方案",
+            "写明百炼前 2000 次免费，之后 29 元/千次，并注明以官方页面为准",
+            "写明智谱各搜索引擎按次计费、Aero 默认使用 search_std，并注明以官方页面为准",
+            "复用任何已有 Key 前必须取得用户明确授权",
+        ],
+        "reuse_available": reuse_available,
+        "reuse_sources": {
+            "bailian": bailian_reuse_sources,
+            "zhipu": zhipu_reuse_sources,
+        },
+        "providers": [
+            {
+                "id": "bailian",
+                "name": "阿里云百炼 WebSearch MCP",
+                "api_key_url": bailian_url,
+                "requirements": [
+                    "创建或复制 DashScope API Key",
+                    "在百炼 MCP 广场手动开通 WebSearch（联网搜索）MCP",
+                    "确认账户余额和调用额度可用",
+                ],
+                "pricing": {
+                    "free_calls": 2000,
+                    "price_cny_per_1000_calls_after_free_quota": 29,
+                    "note": "价格可能调整，以阿里云官方计费页面为准",
+                    "url": bailian_pricing_url,
+                },
+            },
+            {
+                "id": "zhipu",
+                "name": "智谱 AI 搜索",
+                "api_key_url": zhipu_url,
+                "requirements": [
+                    "创建或复制智谱 API Key",
+                    "确认账户余额和搜索调用额度可用",
+                ],
+                "pricing": {
+                    "billing_unit": "每次搜索请求",
+                    "search_std_cny_per_call": 0.01,
+                    "search_pro_cny_per_call": 0.03,
+                    "search_pro_sogou_cny_per_call": 0.05,
+                    "search_pro_quark_cny_per_call": 0.05,
+                    "aero_default_engine": "search_std",
+                    "note": "价格可能调整，以智谱官方联网搜索定价页为准",
+                    "url": zhipu_pricing_url,
+                },
+            },
+        ],
+        "references": [bailian_pricing_url, zhipu_pricing_url],
+    }
+
+
+@register_tool(
+    name="authorize_web_search_key_reuse",
+    description=(
+        "在用户明确回复同意/授权后，把同一供应商已配置的模型 API Key 复用为"
+        "网页搜索凭证。未获得本轮明确授权时严禁调用；本工具不会返回密钥原文。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "provider": {
+                "type": "string",
+                "enum": ["bailian", "zhipu"],
+                "description": "用户明确授权复用的网页搜索供应商。",
+            },
+        },
+        "required": ["provider"],
+    },
+)
+def authorize_web_search_key_reuse(provider: str) -> dict:
+    provider = provider.strip().lower()
+    if provider not in {"bailian", "zhipu"}:
+        return {"status": "error", "message": f"不支持的网页搜索服务商：{provider}"}
+    config = find_config()
+    key = _web_search_reuse_candidate(config, provider)
+    if not key:
+        return {
+            "status": "error",
+            "provider": provider,
+            "message": "没有找到可复用的同供应商 API Key，请改用本地安全输入窗口配置。",
+        }
+    if provider == "zhipu":
+        base_url = "https://open.bigmodel.cn/api/paas/v4/web_search"
+        model = "search_std"
+        action_required = (
+            "凭证已授权复用。请执行 /websearch on 进行连通性测试；"
+            "如失败，请检查智谱账户余额和搜索调用额度。"
+        )
+    else:
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        model = "qwen-turbo"
+        action_required = (
+            "凭证已授权复用，无需重新输入 Key。请先在百炼 MCP 广场搜索"
+            "“WebSearch”或“联网搜索”，完成“立即开通 → 确认开通”，"
+            "然后执行 /websearch on 进行连通性测试。"
+        )
+    save_web_search_api_key(
+        key,
+        base_url,
+        provider=provider,
+        model=model,
+    )
+    config.web_search.provider = provider
+    config.web_search.api_key = key
+    config.web_search.base_url = base_url
+    config.web_search.model = model
+    config.web_search.enabled = False
+    config.web_search.mcp_verified = False
+    config.web_search.mcp_verified_provider = ""
+    config.web_search.mcp_verified_at = 0.0
+    config.save(find_config_path())
+    return {
+        "status": "success",
+        "provider": provider,
+        "credential_reused": True,
+        "api_key_configured": True,
+        "mcp_verified": False,
+        "action_required": action_required,
+        "message": action_required,
+    }
 
 
 @register_tool(
@@ -115,7 +415,8 @@ def check_cds_config() -> dict:
             "CDS API 未配置。请引导用户完成以下步骤：\n"
             "1. 访问 https://cds.climate.copernicus.eu/ 注册账户\n"
             "2. 进入 User Profile → API key\n"
-            "3. 使用本地安全凭据输入框粘贴页面上的两行官方配置：url: ... 和 key: ...\n"
+            "3. 复制页面上的两行官方配置；不要把它们发到聊天框。\n"
+            "4. 请用户只回复“准备好了”或“打开安全输入框”，再打开本地安全凭据输入框。\n"
             "凭据不会发送给模型。"
         ),
     }

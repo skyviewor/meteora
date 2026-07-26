@@ -354,12 +354,13 @@ async def run_shell(
 
 
 def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
-    """Block known-incomplete Cartopy multi-panel plotting scripts before run.
+    """Block unsafe or incomplete Cartopy plotting scripts before run.
 
     Skills guide model behaviour, but a generated source file is the last safe
     point to stop a visually incomplete scientific figure from being exported.
-    This intentionally checks only a narrow, unambiguous pattern: a local
-    Python script containing Cartopy, contourf, and a multi-panel axes loop.
+    The tight-bbox check applies to every local Cartopy contour map: its export
+    bounds are not reliable with Cartopy transforms, colorbars, or inset axes.
+    The remaining checks target multi-panel axes loops.
     """
     try:
         command_parts = shlex.split(command)
@@ -386,6 +387,24 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
             continue
 
         is_cartopy_contour_map = "cartopy" in source and "contourf(" in source
+        if is_cartopy_contour_map and re.search(
+            r"bbox_inches\s*=\s*['\"]tight['\"]", source
+        ):
+            violations = [
+                "Cartopy 地图不得使用 bbox_inches='tight'；请使用 "
+                "layout='compressed'、合适的 figsize 和 colorbar 参数控制留白"
+            ]
+            return {
+                "status": "error",
+                "scientific_plot_validation_failed": True,
+                "message": (
+                    "Cartopy 科学绘图脚本未通过执行前检查："
+                    + "；".join(violations)
+                    + "。请先编辑脚本并重新执行，不能交付不稳定的裁剪结果。"
+                ),
+                "script_path": str(script_path),
+                "violations": violations,
+            }
         is_multi_panel = "axes.flat" in source or re.search(
             r"plt\.subplots\s*\(\s*[^,]+\s*,\s*[^,]+",
             source,
@@ -412,6 +431,15 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
             )
         ):
             violations.append("经纬网必须指定 xlocs/ylocs，并使用 linestyle='--'")
+        if (
+            re.search(r"\.suptitle\s*\(", source)
+            and re.search(r"\.set_title\s*\(", source)
+            and not re.search(r"ensure_suptitle_clearance\s*\(\s*fig\s*,", source)
+        ):
+            violations.append(
+                "同时使用总标题和子图标题时，必须在导出前调用 "
+                "ensure_suptitle_clearance(fig, axes) 检查文字碰撞"
+            )
 
         if violations:
             return {

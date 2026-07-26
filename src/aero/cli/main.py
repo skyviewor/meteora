@@ -86,7 +86,9 @@ from aero.core.config import (
     save_cds_credentials,
     save_llm_profile,
     save_vision_api_key,
+    save_vision_profile,
     save_web_search_api_key,
+    save_web_search_state,
     vision_is_configured,
 )
 from aero.core.debug_log import configure_debug_logging, debug_log
@@ -1379,7 +1381,7 @@ class AeroApp(App):
     #user-input {
         width: 100%;
         height: 2;
-        padding: 0;
+        padding: 0 1;
         border: none;
         background: $surface;
         scrollbar-size: 0 0;
@@ -1745,7 +1747,10 @@ class AeroApp(App):
                 self.config.vision.base_url,
                 provider=self.config.vision.provider,
                 model=self.config.vision.model,
+                mode="separate",
             )
+        elif self.config.vision.mode == "reuse_primary":
+            self._reuse_primary_vision_model(persist=False)
 
         web_search = result.get("web_search", {})
         if web_search.get("configured"):
@@ -1759,12 +1764,37 @@ class AeroApp(App):
                     )
                 )
                 self.config.web_search.model = str(web_search.get("model", "qwen-turbo"))
+                self.config.web_search.enabled = True
+                self.config.web_search.mcp_verified = bool(web_search.get("mcp_verified", True))
+                self.config.web_search.mcp_verified_provider = self.config.web_search.provider
+                self.config.web_search.mcp_verified_at = time.time()
                 save_web_search_api_key(
                     ws_api_key,
                     self.config.web_search.base_url,
                     provider=self.config.web_search.provider,
                     model=self.config.web_search.model,
                 )
+                save_web_search_state(
+                    enabled=True,
+                    mcp_verified=self.config.web_search.mcp_verified,
+                    mcp_verified_provider=self.config.web_search.provider,
+                    mcp_verified_at=self.config.web_search.mcp_verified_at,
+                )
+        else:
+            # “暂不配置” is an explicit choice.  Do not inherit a stale
+            # user-level enabled flag or reuse the primary/vision key as a
+            # search credential on this initialization.
+            self.config.web_search.enabled = False
+            self.config.web_search.api_key = ""
+            self.config.web_search.mcp_verified = False
+            self.config.web_search.mcp_verified_provider = ""
+            self.config.web_search.mcp_verified_at = 0.0
+            save_web_search_state(
+                enabled=False,
+                mcp_verified=False,
+                mcp_verified_provider="",
+                mcp_verified_at=0.0,
+            )
 
         _save_config(self.config)
         self._init_agent()
@@ -1861,7 +1891,10 @@ class AeroApp(App):
                 self.config.vision.base_url,
                 provider=self.config.vision.provider,
                 model=self.config.vision.model,
+                mode="separate",
             )
+        elif self.config.vision.mode == "reuse_primary":
+            self._reuse_primary_vision_model(persist=False)
         _save_config(self.config)
         self._set_footer_status("视觉能力已配置，正在继续当前任务。")
         return True
@@ -1876,7 +1909,17 @@ class AeroApp(App):
             self.call_later(self.query_one("#user-input", TextArea).focus)
 
     def on_text_selected(self, event: events.TextSelected) -> None:
-        selected_text = self.screen.get_selected_text()
+        try:
+            selected_text = self.screen.get_selected_text()
+        except IndexError:
+            # Textual keeps the screen-level selection briefly after a status
+            # panel re-renders from many log lines to its one-line collapsed
+            # form.  The stale offsets can then be outside that widget's new
+            # content.  Ignore that invalid selection instead of letting the
+            # UI event crash the entire chat process.
+            self.screen.clear_selection()
+            event.stop()
+            return
         if not selected_text:
             return
         event.stop()
@@ -2049,7 +2092,7 @@ class AeroApp(App):
             )
         )
         vision_config = resolved_vision_config(self.config)
-        if vision_config is not None:
+        if vision_config is not None and not self._vision_matches_primary(vision_config):
             text += t("app.vision_line", lang).format(
                 model=_display_vision_model_name(vision_config.model),
                 provider=_display_vision_provider_name(vision_config.provider),
@@ -2065,7 +2108,7 @@ class AeroApp(App):
             f"[bold warning]{escape(effort)}[/bold warning]"
         )
         vision_config = resolved_vision_config(self.config)
-        if vision_config is not None:
+        if vision_config is not None and not self._vision_matches_primary(vision_config):
             vision_model = _display_vision_model_name(vision_config.model)
             vision_provider = _display_vision_provider_name(vision_config.provider)
             text += (
@@ -2078,6 +2121,15 @@ class AeroApp(App):
                 self.config.llm.model,
             )
         return text
+
+    def _vision_matches_primary(self, vision_config: Any) -> bool:
+        """Whether the resolved visual endpoint is exactly the active LLM."""
+        return (
+            normalize_provider_id(vision_config.provider)
+            == normalize_provider_id(self.config.llm.provider)
+            and vision_config.model.strip().lower()
+            == self.config.llm.model.strip().lower()
+        )
 
     _COMMANDS = None  # Replaced by instance-level _commands_list for i18n
 
@@ -2416,6 +2468,11 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
+        if text == "/websearch" or text.startswith("/websearch "):
+            await self._handle_websearch_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
         if text == "/mode" or text.startswith("/mode "):
             self._handle_mode_command(text)
             self.query_one("#user-input", TextArea).focus()
@@ -2501,12 +2558,6 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
-        llm_clear = _parse_llm_clear_from_text(text)
-        if llm_clear is not None:
-            await self._handle_local_llm_clear(text, reset_provider=llm_clear["reset_provider"])
-            self.query_one("#user-input", TextArea).focus()
-            return
-
         if self._pending_credential_scope is not None:
             if await self._handle_pending_credential(text):
                 self.query_one("#user-input", TextArea).focus()
@@ -2530,22 +2581,11 @@ class AeroApp(App):
             self.query_one("#user-input", TextArea).focus()
             return
 
-        llm_setup = _parse_llm_setup_from_text(text, self.config)
-        if llm_setup is not None:
-            await self._handle_local_llm_setup(text, llm_setup)
-            self.query_one("#user-input", TextArea).focus()
-            return
-
         if api_key:
-            if self._pending_llm_setup is not None and _is_bare_api_key(text):
-                pending_setup = {**self._pending_llm_setup, "api_key": api_key}
-                await self._handle_local_llm_setup(text, pending_setup)
-            else:
-                await self._handle_unscoped_api_key(text)
+            await self._handle_unscoped_api_key(text)
             self.query_one("#user-input", TextArea).focus()
             return
 
-        self._pending_llm_setup = None
         if _requests_background_execution(text):
             self._enter_chat_mode()
             await self._mount_user_message(text)
@@ -2602,16 +2642,8 @@ class AeroApp(App):
 
         agent_msg = await self._mount_agent_message()
         if not setup.get("api_key"):
-            self._pending_llm_setup = dict(setup)
-            preset = get_provider_preset(setup["provider"])
-            if preset is None:
-                message = "请提供这个模型服务的 API key，或使用 /provider 选择内置服务商。"
-            else:
-                message = (
-                    f"已识别为 {_display_provider_name(setup['provider'])} / {setup['model']}。\n\n"
-                    f"请到这里创建或复制 API key：{preset.api_key_url}\n\n"
-                    "拿到后直接粘贴给我即可，我会在本地保存配置。"
-                )
+            self._pending_llm_setup = None
+            message = "主聊天模型和 API Key 不通过对话文本配置，请使用 `/provider` 打开配置界面。"
             await agent_msg.update(message)
             self._chat_log.append(f"Aero:\n{message}")
             return
@@ -2640,6 +2672,7 @@ class AeroApp(App):
         save_cds_credentials(url, key)
         if self.persist_config:
             _save_config(self.config)
+        self._record_local_credential_saved("cds")
 
         message = (
             "CDS API 凭证已在本地保存，未发送给模型。"
@@ -2649,6 +2682,27 @@ class AeroApp(App):
         await agent_msg.update(message)
         self._chat_log.append(f"Aero:\n{message}")
         self._set_footer_status("CDS API 凭证已保存")
+
+    def _record_local_credential_saved(self, scope: str) -> None:
+        """Keep the model's conversation state in sync without exposing a secret.
+
+        Credential text can be intercepted by the client and saved locally, so
+        that turn never reaches AgentLoop.  Record only the successful state;
+        otherwise a later "continue" can make the model ask for the same key.
+        """
+        if self.agent is None:
+            return
+        self.agent.messages.append(
+            Message(
+                role="assistant",
+                content=(
+                    f"System state: the {scope.upper()} credential is configured "
+                    "locally and available for tools. Its value was not provided to "
+                    "the model. Do not ask the user to enter it again unless a tool "
+                    "reports that this specific credential is invalid or unavailable."
+                ),
+            )
+        )
 
     async def _handle_pending_credential(self, text: str) -> bool:
         """Route a secret by the capability that explicitly requested it."""
@@ -2676,7 +2730,9 @@ class AeroApp(App):
         self.config.vision.mode = "separate"
         self.config.vision.provider = "bailian"
         self.config.vision.api_key = normalized_key
-        save_vision_api_key(normalized_key, self.config.vision.base_url)
+        save_vision_api_key(
+            normalized_key, self.config.vision.base_url, mode="separate"
+        )
         if self.persist_config:
             _save_config(self.config)
 
@@ -2721,17 +2777,11 @@ class AeroApp(App):
         await self._mount_user_message(masked_text)
         self._chat_log.append(f"你:\n{masked_text}")
 
-        if self.config.vision.api_key:
-            message = (
-                "检测到 API Key，已隐藏且未发送给模型。视觉模型凭证已经配置，"
-                "联网搜索会自动复用；本次没有修改主聊天模型。若要替换凭证，"
-                "请明确说明“更换视觉模型 API Key”。"
-            )
-        else:
-            message = (
-                "检测到 API Key，已隐藏且未发送给模型。请明确说明它用于主聊天模型还是视觉模型，"
-                "我再在本地保存，避免误改服务商。"
-            )
+        message = (
+            "检测到 API Key，已隐藏且未发送给模型，本次也没有保存。"
+            "主聊天模型请使用 `/provider` 配置；视觉模型请使用 `/vision`；"
+            "网页搜索请使用 `/websearch provider` 选择服务后，再执行 `/websearch on`。"
+        )
         agent_msg = await self._mount_agent_message()
         await agent_msg.update(message)
         self._chat_log.append(f"Aero:\n{message}")
@@ -3008,6 +3058,7 @@ class AeroApp(App):
             ("/theme", t("cmd.theme", self.config.language)),
             ("/variants", t("cmd.variants", self.config.language)),
             ("/vision", t("cmd.vision", self.config.language)),
+            ("/websearch", "开启/关闭网页搜索"),
             ("/mode", t("cmd.mode", self.config.language)),
             ("/session", t("cmd.session", self.config.language)),
             ("/checkpoint", t("cmd.checkpoint", self.config.language)),
@@ -3021,6 +3072,10 @@ class AeroApp(App):
             ("/subagent", t("cmd.subagent", self.config.language)),
         ]
         self._secondary_commands_list = [
+            ("/websearch on", "开启网页搜索"),
+            ("/websearch off", "关闭网页搜索"),
+            ("/websearch status", "查看网页搜索状态"),
+            ("/websearch provider", "切换网页搜索服务"),
             ("/set max_tool_rounds ", "设置最大工具调用轮次"),
             ("/set model ", "切换模型  如 flash 或 pro"),
             ("/set variants ", "设置推理强度  low/medium/high/max/auto"),
@@ -3254,24 +3309,306 @@ class AeroApp(App):
             self._set_vision_model(selected)
         self.query_one("#user-input", TextArea).focus()
 
-    def _reuse_primary_vision_model(self) -> None:
+    def _reuse_primary_vision_model(self, *, persist: bool = True) -> None:
+        """Snapshot the selected multimodal primary model for visual use.
+
+        The primary chat model may later be switched to a text-only provider.
+        Keep the selected provider/model here and resolve its key through the
+        stored provider profile instead of following that later switch.
+        """
         self.config.vision.mode = "reuse_primary"
-        if self.persist_config:
+        self.config.vision.provider = self.config.llm.provider
+        self.config.vision.model = self.config.llm.model
+        self.config.vision.base_url = self.config.llm.base_url
+        # The key remains in the provider profile / user secrets; do not copy
+        # it into the visual profile.
+        self.config.vision.api_key = ""
+        save_vision_profile(
+            "reuse_primary",
+            provider=self.config.vision.provider,
+            model=self.config.vision.model,
+            base_url=self.config.vision.base_url,
+        )
+        if persist and self.persist_config:
             _save_config(self.config)
         self._refresh_model_info()
-        self._set_footer_status("视觉能力已切换为复用主模型")
+        self._set_footer_status("视觉能力已保存为复用所选主模型")
 
     def _set_vision_model(self, model: str) -> None:
         lang = self.config.language
         self.config.vision.mode = "separate"
         self.config.vision.provider = "bailian"
         self.config.vision.model = model
+        save_vision_profile(
+            "separate",
+            provider=self.config.vision.provider,
+            model=self.config.vision.model,
+            base_url=self.config.vision.base_url,
+        )
         if self.persist_config:
             _save_config(self.config)
         self._refresh_model_info()
         self._set_footer_status(
             t("app.vision_switched", lang).format(model=model)
         )
+
+    async def _handle_websearch_command(self, text: str) -> None:
+        """Toggle native Bailian search or an external search service."""
+        from aero.data.web_search import (
+            bailian_native_search_supported,
+            check_bailian_web,
+            search_zhipu_web,
+        )
+
+        parts = text.split(maxsplit=1)
+        value = parts[1].strip().lower() if len(parts) > 1 else ""
+        if not value:
+            current = "on" if self.config.web_search.enabled else "off"
+            self.push_screen(
+                SelectScreen(
+                    "网页搜索",
+                    [
+                        ("on", "开启网页搜索"),
+                        ("off", "关闭网页搜索"),
+                        ("status", "查看当前状态"),
+                    ],
+                    current,
+                    self.config.language,
+                ),
+                callback=self._apply_selected_websearch,
+            )
+            return
+        if value == "provider" or value.startswith("provider "):
+            selected = value.split(maxsplit=1)[1] if " " in value else ""
+            if selected not in {"bailian", "zhipu"}:
+                self.push_screen(
+                    SelectScreen(
+                        "选择网页搜索服务",
+                        [("bailian", "阿里云百炼 WebSearch MCP"), ("zhipu", "智谱 AI 搜索")],
+                        self.config.web_search.provider or "bailian",
+                        self.config.language,
+                    ),
+                    callback=self._apply_websearch_provider,
+                )
+            else:
+                self._apply_websearch_provider(selected)
+            return
+        if value not in {"on", "off"}:
+            if value == "status":
+                self._show_websearch_status()
+            else:
+                self._set_footer_status("用法：/websearch on、/websearch off 或 /websearch status")
+            return
+        if value == "off":
+            self.config.web_search.enabled = False
+            save_web_search_state(enabled=False)
+            if self.agent is not None:
+                self.agent.config.web_search.enabled = False
+                self.agent.llm.config.web_search_enabled = False
+            self._set_footer_status("网页搜索已关闭。")
+            return
+
+        provider = (self.config.web_search.provider or "bailian").strip().lower()
+        native = (
+            self.config.llm.provider == "bailian"
+            and bailian_native_search_supported(self.config.llm.model)
+        )
+        if native:
+            self.config.web_search.enabled = True
+            save_web_search_state(enabled=True)
+            if self.agent is not None:
+                self.agent.config.web_search.enabled = True
+                self.agent.llm.config.web_search_enabled = True
+            self._set_footer_status(
+                f"网页搜索已开启，将优先使用 {self.config.llm.model} 的内置联网搜索。"
+            )
+            return
+
+        # Search credentials are capability-scoped. Never silently reuse a
+        # primary/vision key; ask for explicit authorization below.
+        api_key = self.config.web_search.api_key.strip()
+        if not api_key:
+            candidate = self._websearch_reuse_candidate(provider)
+            if candidate:
+                choice = await self.push_screen_wait(
+                    ConfirmScreen(
+                        (
+                            f"检测到已配置的{provider} API Key。\n\n"
+                            "是否明确授权将它复用为网页搜索服务凭证？\n"
+                            "授权后密钥仅保存在本地，不会写入对话。"
+                        ),
+                        self.config.language,
+                        allow_label="授权复用",
+                        deny_label="改为输入新 Key",
+                    )
+                )
+                if choice == "allow":
+                    api_key = candidate
+                    self.config.web_search.api_key = api_key
+                    save_web_search_api_key(
+                        api_key,
+                        self.config.web_search.base_url,
+                        provider=provider,
+                        model=self.config.web_search.model,
+                    )
+            if not api_key:
+                await self._prompt_websearch_key(provider)
+                api_key = self.config.web_search.api_key.strip()
+            if not api_key:
+                self._set_footer_status("未配置网页搜索 API Key，网页搜索保持关闭。")
+                return
+
+        if (
+            self.config.web_search.mcp_verified
+            and self.config.web_search.mcp_verified_provider == provider
+        ):
+            self.config.web_search.enabled = True
+            save_web_search_state(enabled=True)
+            if self.agent is not None:
+                self.agent.config.web_search.enabled = True
+                self.agent.llm.config.web_search_enabled = True
+            self._set_footer_status("网页搜索已开启（已复用之前的连通性测试结果）。")
+            return
+        try:
+            if provider == "bailian":
+                await check_bailian_web(api_key)
+            elif provider == "zhipu":
+                await search_zhipu_web(api_key, "联网搜索连通性测试", limit=1)
+            else:
+                raise RuntimeError(f"不支持的搜索供应商：{provider}")
+        except Exception as exc:
+            self.config.web_search.enabled = False
+            save_web_search_state(enabled=False, mcp_verified=False)
+            self._set_footer_status(f"网页搜索连通性测试失败，未开启：{str(exc)[:180]}")
+            return
+        self.config.web_search.enabled = True
+        self.config.web_search.mcp_verified = True
+        self.config.web_search.mcp_verified_provider = provider
+        self.config.web_search.mcp_verified_at = time.time()
+        save_web_search_state(
+            enabled=True,
+            mcp_verified=True,
+            mcp_verified_provider=provider,
+            mcp_verified_at=self.config.web_search.mcp_verified_at,
+        )
+        if self.agent is not None:
+            self.agent.config.web_search.enabled = True
+            self.agent.llm.config.web_search_enabled = True
+        self._set_footer_status("网页搜索已开启，连通性测试通过。")
+
+    def _websearch_reuse_candidate(self, provider: str) -> str:
+        """Return a same-provider key only as a candidate for explicit consent."""
+        if provider == (self.config.llm.provider or "").strip().lower():
+            key = self.config.llm.active_api_key().strip()
+            if key:
+                return key
+        if provider == (self.config.vision.provider or "").strip().lower():
+            key = self.config.vision.api_key.strip()
+            if key:
+                return key
+        return ""
+
+    def _apply_websearch_provider(self, selected: str | None) -> None:
+        if selected not in {"bailian", "zhipu"}:
+            self.query_one("#user-input", TextArea).focus()
+            return
+        self.config.web_search.provider = selected
+        self.config.web_search.api_key = ""
+        self.config.web_search.enabled = False
+        self.config.web_search.mcp_verified = False
+        self.config.web_search.mcp_verified_provider = ""
+        self.config.web_search.mcp_verified_at = 0.0
+        save_web_search_state(
+            enabled=False,
+            mcp_verified=False,
+            mcp_verified_provider="",
+            mcp_verified_at=0.0,
+        )
+        self._set_footer_status(
+            f"已选择网页搜索服务：{'阿里云百炼' if selected == 'bailian' else '智谱 AI'}；"
+            "尚未配置搜索 API Key，连通性测试未执行，网页搜索未启用。"
+        )
+        self.query_one("#user-input", TextArea).focus()
+
+    async def _prompt_websearch_key(self, provider: str) -> None:
+        if provider == "zhipu":
+            title = "输入智谱 AI 网页搜索 API Key"
+            guide = (
+                "请访问 https://open.bigmodel.cn/apikey/platform 创建并复制 API Key。\n"
+                "智谱搜索无需开通百炼 MCP；请确认智谱账户余额和搜索调用额度可用。\n"
+                "密钥只在本地保存，不会写入对话，也不会发送给模型。"
+            )
+        else:
+            title = "输入阿里云百炼网页搜索 API Key"
+            guide = (
+                "请访问 https://bailian.console.aliyun.com/cn-beijing/"
+                "?apiKey=1&tab=globalset#/efm/api_key 创建或复制 DashScope API Key。\n"
+                "然后进入百炼 MCP 广场，搜索“WebSearch”或“联网搜索”，"
+                "点击“立即开通 → 确认开通”。\n"
+                "API Key 与 MCP 开通两项缺一不可；请同时确认账户余额和调用额度可用。\n"
+                "计费：全部用户前 2000 次调用免费，免费额度用尽后按 29 元/千次计费；"
+                "价格可能调整，以阿里云官方页面为准。\n"
+                "密钥只在本地保存，不会写入对话，也不会发送给模型。"
+            )
+        entered = await self.push_screen_wait(
+            SecretInputScreen(
+                SecretInputRequest(
+                    scope="web_search",
+                    title=title,
+                    instructions=guide,
+                    multiline=False,
+                )
+            )
+        )
+        if entered:
+            self.config.web_search.api_key = str(entered).strip()
+            save_web_search_api_key(
+                self.config.web_search.api_key,
+                self.config.web_search.base_url,
+                provider=provider,
+                model=self.config.web_search.model,
+            )
+
+    def _apply_selected_websearch(self, selected: str | None) -> None:
+        if selected:
+            self.run_worker(
+                self._handle_websearch_command(f"/websearch {selected}"),
+                exclusive=True,
+            )
+        self.query_one("#user-input", TextArea).focus()
+
+    def _show_websearch_status(self) -> None:
+        """Show local state without issuing a network request."""
+        from aero.data.web_search import bailian_native_search_supported
+
+        if not self.config.web_search.enabled:
+            self._show_checkpoint_message(
+                "### 网页搜索状态\n\n当前：**关闭**\n\n使用 `/websearch on` 开启。",
+                force_scroll=True,
+            )
+            return
+        native = (
+            self.config.llm.provider == "bailian"
+            and bailian_native_search_supported(self.config.llm.model)
+        )
+        if native:
+            detail = (
+                f"当前：**已开启**\n\n优先路径：百炼模型内置联网搜索\n"
+                f"当前模型：`{self.config.llm.model}`\n"
+                "模型会在需要实时信息时自行决定是否搜索。"
+            )
+        else:
+            provider = self.config.web_search.provider or "bailian"
+            verified = (
+                self.config.web_search.mcp_verified
+                and self.config.web_search.mcp_verified_provider == provider
+            )
+            detail = (
+                f"当前：**已开启**\n\n外部搜索服务：`{provider}`\n"
+                f"API Key：{'已配置' if self.config.web_search.api_key else '未单独配置（可能复用视觉 Key）'}\n"
+                f"连通性测试：{'已通过' if verified else '未通过或未测试'}"
+            )
+        self._show_checkpoint_message("### 网页搜索状态\n\n" + detail, force_scroll=True)
 
     def _handle_mode_command(self, text: str) -> None:
         from aero.data.modes import MODE_LABELS, MODE_OPTIONS
@@ -5498,7 +5835,6 @@ class AeroApp(App):
             content_blocked = False
             status_auto_collapsed = False
             vision_setup_requested = False
-            credential_setup_requested = False
 
             def maybe_handoff_claimed_background(status_text: str) -> bool:
                 if state.background_task is not None:
@@ -5551,11 +5887,6 @@ class AeroApp(App):
                         credential_scope = _credential_setup_scope(event.content)
                         if credential_scope is not None:
                             self._pending_credential_scope = credential_scope
-                            if not credential_setup_requested:
-                                credential_setup_requested = True
-                                await self._open_required_credential_input(
-                                    credential_scope
-                                )
                         if (
                             not vision_setup_requested
                             and _vision_setup_required(event.content)
@@ -5915,34 +6246,6 @@ class AeroApp(App):
     def _take_secret_handle(self, handle: str) -> str | None:
         return self._secret_handles.pop(handle, None)
 
-    async def _open_required_credential_input(self, scope: str) -> None:
-        """Enforce local secret entry for a tool-declared missing credential."""
-        spec = get_credential_spec(scope)
-        if spec is None:
-            self._set_footer_status(f"无法为未知凭据用途打开安全输入窗口：{scope}")
-            return
-        result = await self._request_secret_input(
-            SecretInputRequest(
-                scope=spec.scope,
-                title=spec.title,
-                instructions=spec.instructions,
-                multiline=spec.multiline,
-            )
-        )
-        if result.get("status") != "submitted":
-            return
-        from aero.toolbox.tools.configuration import save_secret_handle
-
-        saved = save_secret_handle(scope, str(result["secret_handle"]))
-        if saved.get("status") != "success":
-            self._set_footer_status(str(saved.get("message") or "凭据保存失败"))
-            return
-        config_path = self._project_dir / "aero.yaml"
-        if config_path.exists():
-            self.config.credentials = AeroConfig.load(config_path).credentials
-        self._pending_credential_scope = None
-        self._set_footer_status(f"{scope.upper()} API 凭证已保存")
-
     async def _handle_confirm(self, content: str) -> None:
         tool_name = str(json.loads(content).get("tool", ""))
         choice = await self._show_confirm_dialog(content)
@@ -6027,6 +6330,44 @@ class AeroApp(App):
                     f"{t('confirm.files', lang)} ({len(paths)})\n\n"
                     f"{files_str}\n\n"
                     f"{t('confirm.irreversible_short', lang)}"
+                )
+            if tool_name == "run_shell":
+                commands = [str(item.get("command") or "") for item in batch_args]
+                try:
+                    from aero.toolbox.tools.runtime import _redact_shell_command
+
+                    commands = [_redact_shell_command(command) for command in commands]
+                except Exception:
+                    pass
+                command_list = "\n\n".join(
+                    f"{index}.\n  {command or '（空命令）'}"
+                    for index, command in enumerate(commands, 1)
+                )
+                workdirs = []
+                for item in batch_args:
+                    workdir = str(item.get("workdir") or ".")
+                    if workdir not in workdirs:
+                        workdirs.append(workdir)
+                runtime_setup = bool(commands) and all(
+                    ".aero/runtime" in command.replace("\\", "/")
+                    and re.match(r"\s*(?:mkdir\s+-p|ln\s+-[sfn ]+)", command)
+                    for command in commands
+                )
+                if runtime_setup:
+                    return (
+                        "← 初始化 Aero 私有运行环境\n\n"
+                        "为运行绘图和数据处理，Aero 需要准备自己的运行时目录。\n\n"
+                        f"命令（{len(commands)} 条）\n\n{command_list}\n\n"
+                        "影响说明\n"
+                        "  仅影响 Aero 私有运行环境，不会修改当前项目文件\n"
+                        "  不会删除数据；如不再需要，可用 `aero runtime clean` 清理\n\n"
+                        "是否允许？"
+                    )
+                workdir_text = "、".join(workdirs)
+                return (
+                    f"← 执行 Shell 命令\n\n"
+                    f"工作目录：{workdir_text}\n\n"
+                    f"命令（{len(commands)} 条）\n\n{command_list}"
                 )
             args_summary = "\n".join(
                 _truncate_middle(json.dumps(a, ensure_ascii=False, default=str), 96)
@@ -6539,7 +6880,7 @@ def _llm_auth_setup_message(config: AeroConfig) -> str:
                 f"你可以到这里创建或复制新的 API key：{preset.api_key_url}",
             ]
         )
-    lines.extend(["", "拿到新的 key 后直接粘贴给我，我会帮你保存配置。"])
+    lines.extend(["", "请使用 `/provider` 打开主模型配置界面，不要把 API Key 粘贴到对话框。"])
     return "\n".join(lines)
 
 
@@ -7142,6 +7483,7 @@ def _help_text(lang: str) -> str:
         t("help.slash_theme", lang),
         t("help.slash_variants", lang),
         t("help.slash_vision", lang),
+        "  /websearch [on|off|status]  管理网页搜索开关并查看状态",
         t("help.slash_mode", lang),
         t("help.slash_session", lang),
         t("help.slash_session_rename", lang),
@@ -7335,6 +7677,10 @@ def _stderr_line_looks_like_error(text: str) -> bool:
     if not line:
         return False
     lowered = line.lower()
+    # Matplotlib emits font fallback notices to stderr even when a figure was
+    # successfully saved. They are actionable diagnostics, not command errors.
+    if lowered.startswith("findfont:"):
+        return False
     if "download completed" in lowered:
         return False
     if re.match(r"^\d{4}-\d{2}-\d{2} .*?\b(info|debug)\b", line, flags=re.IGNORECASE):

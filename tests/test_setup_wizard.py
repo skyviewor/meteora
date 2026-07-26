@@ -1,5 +1,7 @@
 """Tests for the first-run model setup wizard."""
 
+import asyncio
+
 import pytest
 from rich.table import Table
 from textual.app import App, ComposeResult
@@ -69,6 +71,96 @@ async def test_wizard_offers_primary_reuse_for_known_multimodal_model():
 
 
 @pytest.mark.asyncio
+async def test_bailian_multimodal_primary_takes_priority_over_key_reuse_picker():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {
+            "provider": "bailian",
+            "model": "qwen3.7-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "sk-bailian",
+        }
+        wizard._primary_supports_vision = True
+        wizard._page = "vision_mode"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+
+        assert option_ids[0] == "reuse_primary"
+        assert "reuse_bailian_primary_key" not in option_ids
+
+
+@pytest.mark.asyncio
+async def test_wizard_reuses_bailian_text_model_key_for_a_separate_vision_model():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {
+            "provider": "bailian",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "sk-bailian",
+        }
+        wizard._primary_supports_vision = False
+        wizard._page = "vision_mode"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+        assert [options.get_option_at_index(i).id for i in range(options.option_count)] == [
+            "reuse_bailian_primary_key",
+            "unconfigured",
+            "separate",
+        ]
+
+        wizard._choose("reuse_bailian_primary_key")
+        options = wizard.query_one("#setup-list", OptionList)
+        option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
+        assert "custom" not in option_ids
+        assert all(
+            str(options.get_option_at_index(i).id).startswith("bailian|")
+            for i in range(options.option_count)
+        )
+
+        wizard._choose("bailian|qwen3.7-plus")
+        assert wizard._page == "web_search_setup"
+        assert wizard._vision == {
+            "mode": "separate",
+            "provider": "bailian",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "sk-bailian",
+            "model": "qwen3.7-plus",
+        }
+
+
+@pytest.mark.asyncio
+async def test_text_only_non_bailian_primary_offers_no_vision_reuse():
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "sk-deepseek",
+        }
+        wizard._primary_supports_vision = False
+        wizard._page = "vision_mode"
+        wizard._render_page()
+        options = wizard.query_one("#setup-list", OptionList)
+
+        assert [options.get_option_at_index(i).id for i in range(options.option_count)] == [
+            "unconfigured",
+            "separate",
+        ]
+
+
+@pytest.mark.asyncio
 async def test_web_search_hides_duplicate_bailian_setup_when_key_can_be_reused():
     app = WizardHost()
 
@@ -84,7 +176,8 @@ async def test_web_search_hides_duplicate_bailian_setup_when_key_can_be_reused()
         wizard._render_page()
         options = wizard.query_one("#setup-list", OptionList)
         option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
-        assert option_ids == ["skip", "reuse_bailian", "configure_zhipu"]
+        assert option_ids == ["reuse_bailian", "skip", "configure_zhipu"]
+        assert options.highlighted == 0
 
 
 @pytest.mark.asyncio
@@ -118,7 +211,8 @@ async def test_web_search_hides_duplicate_zhipu_setup_when_key_can_be_reused():
         wizard._render_page()
         options = wizard.query_one("#setup-list", OptionList)
         option_ids = [options.get_option_at_index(i).id for i in range(options.option_count)]
-        assert option_ids == ["skip", "configure_bailian", "reuse_zhipu"]
+        assert option_ids == ["reuse_zhipu", "skip", "configure_bailian"]
+        assert options.highlighted == 0
 
 
 @pytest.mark.asyncio
@@ -238,10 +332,14 @@ async def test_bailian_provider_lists_all_preset_models():
         assert model_ids == [
             "qwen3.7-max",
             "qwen3.7-plus",
+            "qwen3.7-flash",
             "qwen3.6-plus",
             "qwen3.6-flash",
             "qwen3.5-plus",
             "qwen3.5-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "glm-5.2",
         ]
         prompt = options.get_option_at_index(1).prompt
         assert isinstance(prompt, Table)
@@ -260,6 +358,12 @@ async def test_switching_to_provider_without_key_opens_setup_screen(
     monkeypatch,
 ):
     monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+
+    async def successful_connection(_: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", successful_connection)
+    monkeypatch.setattr(FirstRunSetupScreen, "_CONNECTION_SUCCESS_DELAY", 0)
     config = AeroConfig.create_default()
     config.llm.provider = "bailian"
     config.llm.model = "qwen3.7-plus"
@@ -292,7 +396,12 @@ async def test_switching_to_provider_without_key_opens_setup_screen(
 
 
 @pytest.mark.asyncio
-async def test_primary_only_setup_reuses_provider_connection_form():
+async def test_primary_only_setup_reuses_provider_connection_form(monkeypatch):
+    async def successful_connection(_: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", successful_connection)
+    monkeypatch.setattr(FirstRunSetupScreen, "_CONNECTION_SUCCESS_DELAY", 0)
     app = WizardHost(
         primary_only=True,
         primary={
@@ -324,6 +433,104 @@ async def test_primary_only_setup_reuses_provider_connection_form():
             "api_key": "sk-test-provider",
         }
         assert app.result["vision"]["mode"] == "unconfigured"
+
+
+@pytest.mark.asyncio
+async def test_primary_setup_keeps_form_open_when_connection_test_fails(monkeypatch):
+    async def failed_connection(_: dict[str, str]) -> None:
+        raise RuntimeError("LLM API 未授权（401）：当前模型服务商的 API key 无效或不匹配。")
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", failed_connection)
+    app = WizardHost(
+        primary_only=True,
+        primary={
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "base_url": "https://api.deepseek.com",
+        },
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard.query_one("#setup-key", Input).value = "sk-invalid"
+        wizard._submit_form()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.result is None
+        assert wizard._page == "primary_form"
+        assert "连通性测试失败" in str(wizard.query_one("#setup-error", Static).render())
+        assert wizard.query_one("#setup-key", Input).disabled is False
+
+
+@pytest.mark.asyncio
+async def test_primary_setup_shows_green_success_before_advancing(monkeypatch):
+    async def successful_connection(_: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", successful_connection)
+    monkeypatch.setattr(FirstRunSetupScreen, "_CONNECTION_SUCCESS_DELAY", 0.05)
+    app = WizardHost(
+        primary={
+            "provider": "bailian",
+            "model": "qwen3.7-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        },
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._page = "primary_form"
+        wizard._render_page()
+        wizard.query_one("#setup-key", Input).value = "sk-valid"
+        wizard._submit_form()
+        await pilot.pause()
+
+        status = wizard.query_one("#setup-error", Static)
+        assert wizard._page == "primary_form"
+        assert str(status.render()) == "测试通过"
+        assert status.has_class("setup-success")
+
+        await asyncio.sleep(0.06)
+        await pilot.pause()
+        assert wizard._page == "vision_mode"
+
+
+@pytest.mark.asyncio
+async def test_vision_setup_tests_connection_before_saving(monkeypatch):
+    async def successful_connection(values: dict[str, str]) -> None:
+        assert values["model"] == "qwen3.7-plus"
+        assert values["api_key"] == "sk-vision"
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", successful_connection)
+    monkeypatch.setattr(FirstRunSetupScreen, "_CONNECTION_SUCCESS_DELAY", 0.05)
+    app = WizardHost(vision_only=True)
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._vision = {
+            "mode": "separate",
+            "provider": "bailian",
+            "model": "qwen3.7-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        }
+        wizard._page = "vision_form"
+        wizard._render_page()
+        wizard.query_one("#setup-key", Input).value = "sk-vision"
+        wizard._submit_form()
+        await pilot.pause()
+
+        assert wizard._page == "vision_form"
+        assert str(wizard.query_one("#setup-error", Static).render()) == "测试通过"
+        assert wizard.query_one("#setup-error", Static).has_class("setup-success")
+
+        await asyncio.sleep(0.06)
+        await pilot.pause()
+        assert app.result is not None
+        assert app.result["vision"]["api_key"] == "sk-vision"
 
 
 @pytest.mark.asyncio
@@ -366,7 +573,7 @@ async def test_choice_page_can_move_to_back_and_cancel_with_keyboard():
 
 
 @pytest.mark.asyncio
-async def test_form_can_reach_all_visible_actions_with_keyboard():
+async def test_primary_form_can_reach_continue_back_and_cancel_with_keyboard():
     app = WizardHost()
 
     async with app.run_test(size=(100, 30)) as pilot:
@@ -382,9 +589,6 @@ async def test_form_can_reach_all_visible_actions_with_keyboard():
         assert wizard._selected_action == 0
 
         await pilot.press("right")
-        assert wizard._selected_action == 1
-        assert wizard.query_one("#setup-skip").has_class("setup-selected")
-        await pilot.press("right")
         assert wizard._selected_action == 2
         assert wizard.query_one("#setup-back").has_class("setup-selected")
         await pilot.press("right")
@@ -392,6 +596,56 @@ async def test_form_can_reach_all_visible_actions_with_keyboard():
         assert wizard.query_one("#setup-cancel").has_class("setup-selected")
         await pilot.press("left")
         assert wizard._selected_action == 2
+
+
+@pytest.mark.asyncio
+async def test_back_from_vision_mode_returns_focus_to_primary_api_key(monkeypatch):
+    async def successful_connection(_: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr("aero.cli.setup_wizard._test_primary_connection", successful_connection)
+    monkeypatch.setattr(FirstRunSetupScreen, "_CONNECTION_SUCCESS_DELAY", 0)
+    app = WizardHost()
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        await pilot.pause()
+        wizard = app.screen
+        wizard._primary = {
+            "provider": "bailian",
+            "model": "qwen3.7-plus",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "api_key": "sk-bailian",
+        }
+        wizard._page = "primary_form"
+        wizard._render_page()
+        wizard.query_one("#setup-key", Input).value = "sk-bailian"
+        wizard._submit_form()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert wizard._page == "vision_mode"
+        await pilot.pause()
+
+        options = wizard.query_one("#setup-list", OptionList)
+        options.highlighted = options.option_count - 1
+        options.focus()
+        await pilot.press("down", "right", "enter")
+        await asyncio.sleep(0.06)
+        await pilot.pause()
+
+        api_key = wizard.query_one("#setup-key", Input)
+        assert wizard._page == "primary_form"
+        assert api_key.disabled is False
+        assert wizard.focused is api_key
+
+        await pilot.press("down")
+        assert wizard._action_focused is True
+        await pilot.press("up")
+        assert wizard.focused is api_key
+
+        wizard.set_focus(None)
+        await pilot.press("down")
+        assert wizard.focused is api_key
 
 
 def test_model_command_options_use_setup_feature_labels():
@@ -439,7 +693,11 @@ async def test_model_command_picker_keeps_raw_model_ids_and_keyboard_selection(
             "均衡",
         )
 
-        options.highlighted = 2
+        options.highlighted = next(
+            index
+            for index in range(options.option_count)
+            if options.get_option_at_index(index).id == "qwen3.6-plus"
+        )
         await pilot.press("enter")
         await pilot.pause()
 
