@@ -73,6 +73,16 @@ def test_builtin_era5_skill_is_selected_for_era5_downloads():
     assert "era5-cds" in [item.skill.name for item in selected]
 
 
+def test_vertical_cross_section_loads_scientific_plotting_guidance():
+    selected = SkillSelector().select("绘制青藏高原南北向风场垂直剖面图")
+    context = render_skill_context(selected)
+
+    assert "scientific-plotting" in [item.skill.name for item in selected]
+    assert "references/vertical-cross-sections.md" in context
+    assert "references/cross-section-wind-vectors.md" in context
+    assert "references/wind-barbs.md" in context
+
+
 def test_skill_selector_always_activates_plotting_skill_for_a_drawing_verb(tmp_path):
     builtin = tmp_path / "builtin"
     _write_skill(builtin, "scientific-plotting", "Scientific plotting workflow.")

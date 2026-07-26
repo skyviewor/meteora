@@ -1,15 +1,11 @@
-"""LLM client for OpenAI-compatible providers and DashScope native search.
-
-Most providers use OpenAI-compatible Chat Completions.  Bailian models with
-native web search enabled use DashScope's native Generation API instead: that
-is the only route that returns the search sources/citation metadata.
-"""
+"""LLM client using OpenAI-compatible Chat Completions for every provider."""
 
 import asyncio
 import json
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -69,7 +65,6 @@ class LLMConfig:
     api_key: str = ""
     base_url: str = ""
     max_tokens: int | None = None
-    web_search_enabled: bool = False
 
     @property
     def endpoint(self) -> str:
@@ -121,20 +116,14 @@ class LLMClient:
         self._client = httpx.AsyncClient(timeout=120)
         self.last_usage: dict | None = None
         self.last_search_references: list[str] = []
+        self.last_search_performed = False
+        self.last_request_started_at: datetime | None = None
 
     async def close(self):
         await self._client.aclose()
 
     async def chat(self, messages: list[Message]) -> str:
         """Send messages to LLM and return text response."""
-        if self._uses_dashscope_native_search():
-            chunks: list[str] = []
-            async for event in self._dashscope_stream(messages, tools=None):
-                if event.type == "text":
-                    chunks.append(event.content)
-                elif event.type == "done":
-                    self.last_usage = event.usage
-            return "".join(chunks)
         response = await self._send(messages, tools=None)
         self.last_usage = response.get("usage")
         choice = _first_choice(response)
@@ -142,11 +131,8 @@ class LLMClient:
 
     async def chat_stream(self, messages: list[Message]) -> AsyncGenerator[StreamEvent, None]:
         """Stream text tokens from LLM."""
-        if self._uses_dashscope_native_search():
-            async for event in self._dashscope_stream(messages, tools=None):
-                yield event
-            return
         self.last_search_references = []
+        self.last_search_performed = False
         headers = self._headers()
         body = self._request_body(messages, stream=True)
 
@@ -156,6 +142,7 @@ class LLMClient:
             emitted = False
             captured_usage: dict | None = None
             try:
+                self.last_request_started_at = datetime.now(timezone.utc)
                 async with self._client.stream(
                     "POST", self.config.endpoint, json=body, headers=headers
                 ) as response:
@@ -192,17 +179,6 @@ class LLMClient:
         self, messages: list[Message], tools: list[dict]
     ) -> tuple[str, list[ToolCall]]:
         """Send messages to LLM with tool definitions, return text + tool calls."""
-        if self._uses_dashscope_native_search():
-            chunks: list[str] = []
-            tool_calls: list[ToolCall] = []
-            async for event in self._dashscope_stream(messages, tools=tools):
-                if event.type == "text":
-                    chunks.append(event.content)
-                elif event.type == "tool_call" and event.tool_call is not None:
-                    tool_calls.append(event.tool_call)
-                elif event.type == "done":
-                    self.last_usage = event.usage
-            return "".join(chunks), tool_calls
         response = await self._send(messages, tools=tools)
         self.last_usage = response.get("usage")
         choice = _first_choice(response)
@@ -231,12 +207,8 @@ class LLMClient:
         Yields StreamEvent with type "text" for tokens, "tool_call" for tool calls,
         and "done" when the stream ends.
         """
-        if self._uses_dashscope_native_search():
-            async for event in self._dashscope_stream(messages, tools=tools):
-                yield event
-            return
-
         self.last_search_references = []
+        self.last_search_performed = False
         headers = self._headers()
         body = self._request_body(messages, tools=tools, stream=True)
 
@@ -249,6 +221,7 @@ class LLMClient:
             content_sent = 0
             captured_usage: dict | None = None
             try:
+                self.last_request_started_at = datetime.now(timezone.utc)
                 async with self._client.stream(
                     "POST", self.config.endpoint, json=body, headers=headers
                 ) as response:
@@ -365,12 +338,8 @@ class LLMClient:
         return headers
 
     def _uses_dashscope_native_search(self) -> bool:
-        """Whether this request needs DashScope native search/source support."""
-        if not (self.config.provider == "bailian" and self.config.web_search_enabled):
-            return False
-        from aero.data.web_search import bailian_native_search_supported
-
-        return bailian_native_search_supported(self.config.model)
+        """Native model-side search was removed; all chat uses OpenAI format."""
+        return False
 
     def _uses_dashscope_multimodal_search(self) -> bool:
         """Whether the current native-search call needs the multimodal API."""
@@ -388,31 +357,20 @@ class LLMClient:
     async def _send(
         self, messages: list[Message], tools: list[dict] | None
     ) -> dict:
-        native_search = self._uses_dashscope_native_search()
-        if not native_search:
-            self.last_search_references = []
-        headers = self._dashscope_headers() if native_search else self._headers()
-        body = (
-            self._dashscope_request_body(messages, tools=tools)
-            if native_search
-            else self._request_body(messages, tools=tools, stream=False)
-        )
-        endpoint = (
-            self._dashscope_native_endpoint() if native_search else self.config.endpoint
-        )
+        self.last_search_references = []
+        self.last_search_performed = False
+        headers = self._headers()
+        body = self._request_body(messages, tools=tools, stream=False)
+        endpoint = self.config.endpoint
 
         logger.info("llm.request", model=self.config.model, tool_count=len(tools or []))
 
         for attempt in range(_TRANSIENT_RETRIES + 1):
             try:
+                self.last_request_started_at = datetime.now(timezone.utc)
                 resp = await self._client.post(endpoint, json=body, headers=headers)
                 _raise_for_status(resp)
-                response = resp.json()
-                if native_search:
-                    _raise_dashscope_payload_error(response)
-                    self.last_search_references = _dashscope_reference_urls(response)
-                    return _dashscope_to_openai_response(response)
-                return response
+                return resp.json()
             except _TRANSIENT_HTTP_ERRORS as e:
                 if attempt < _TRANSIENT_RETRIES:
                     logger.warning("llm.request.retry", error=repr(e), attempt=attempt + 1)
@@ -450,56 +408,12 @@ class LLMClient:
         *,
         stream: bool = False,
     ) -> dict:
-        """Build a DashScope Generation request with model-side web search.
-
-        ``enable_source`` lets Aero turn the provider's source URLs into the
-        normal in-app reference section.  Search remains model-driven: no
-        force-search switch is sent, so ordinary offline questions do not
-        incur a web-search call.
-        """
-        multimodal = self._uses_dashscope_multimodal_search()
-        search_options: dict = {
-            "search_strategy": "agent" if multimodal else "turbo",
-            "enable_source": True,
-        }
-        if not multimodal:
-            # These features are supported by the text-generation search
-            # protocol.  The multimodal ``agent`` strategy only supports
-            # returning sources, so do not send unsupported options there.
-            search_options.update(
-                {
-                    "enable_citation": True,
-                    "citation_format": "[ref_<number>]",
-                }
-            )
-        parameters: dict = {
-            "result_format": "message",
-            "enable_search": True,
-            "search_options": search_options,
-        }
-        if stream:
-            # DashScope uses this parameter (in addition to the SSE header)
-            # to emit incremental Generation chunks.  Without it some
-            # gateways finish a request as a normal/empty response, which the
-            # generic SSE reader cannot turn into assistant text.
-            parameters["incremental_output"] = True
-        if self.config.max_tokens is not None:
-            parameters["max_tokens"] = self.config.max_tokens
-        if tools:
-            # In DashScope native Generation, function tools live under
-            # ``parameters`` rather than at the OpenAI request top level.
-            parameters["tools"] = tools
-            parameters["tool_choice"] = "auto"
-        return {
-            "model": self.config.model,
-            "input": {
-                "messages": [
-                    self._format_dashscope_message(m, multimodal=multimodal)
-                    for m in messages
-                ]
-            },
-            "parameters": parameters,
-        }
+        """Reject the removed native Generation/search protocol."""
+        del messages, tools, stream
+        raise RuntimeError(
+            "DashScope 原生 Generation/内置联网已停用；"
+            "百炼聊天必须使用 OpenAI-compatible API，联网必须调用 search_web。"
+        )
 
     async def _dashscope_stream(
         self, messages: list[Message], tools: list[dict] | None
@@ -516,6 +430,8 @@ class LLMClient:
         )
 
         for attempt in range(_TRANSIENT_RETRIES + 1):
+            self.last_search_references = []
+            self.last_search_performed = False
             emitted = False
             captured_usage: dict | None = None
             content_so_far = ""
@@ -541,6 +457,8 @@ class LLMClient:
                     captured_usage = usage
 
                 urls = _dashscope_reference_urls(payload)
+                if _dashscope_search_performed(payload):
+                    self.last_search_performed = True
                 new_urls = [url for url in urls if url not in sent_references]
                 if new_urls:
                     sent_references.update(new_urls)
@@ -571,6 +489,7 @@ class LLMClient:
                 return new_urls, delta
 
             try:
+                self.last_request_started_at = datetime.now(timezone.utc)
                 async with self._client.stream(
                     "POST",
                     self._dashscope_native_endpoint(),
@@ -762,6 +681,12 @@ def _dashscope_reference_urls(response: dict) -> list[str]:
         if isinstance(url, str) and url.startswith(("https://", "http://")):
             urls.append(url)
     return list(dict.fromkeys(urls))
+
+
+def _dashscope_search_performed(response: dict) -> bool:
+    """Detect provider evidence that native search ran for this request."""
+    output = response.get("output")
+    return isinstance(output, dict) and isinstance(output.get("search_info"), dict)
 
 
 def _merge_dashscope_tool_call(

@@ -299,7 +299,8 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
         if saved_mode in {"reuse_primary", "separate", "unconfigured"}:
             config.vision.mode = saved_mode
         config.vision.api_key = str(vision.get("api_key") or config.vision.api_key)
-        config.vision.base_url = str(vision.get("base_url") or config.vision.base_url)
+        if "base_url" in vision:
+            config.vision.base_url = str(vision.get("base_url") or "")
         config.vision.provider = normalize_provider_id(
             str(vision.get("provider") or config.vision.provider)
         )
@@ -427,8 +428,7 @@ def save_vision_api_key(
     vision = secrets.setdefault("vision", {})
     vision["mode"] = mode
     vision["api_key"] = api_key
-    if base_url:
-        vision["base_url"] = base_url
+    vision["base_url"] = base_url
     if provider:
         vision["provider"] = provider
     if model:
@@ -457,8 +457,7 @@ def save_vision_profile(
         vision["provider"] = provider
     if model:
         vision["model"] = model
-    if base_url:
-        vision["base_url"] = base_url
+    vision["base_url"] = base_url
     save_user_secrets(secrets)
 
 
@@ -569,10 +568,15 @@ def _separate_vision_api_key(config: AeroConfig) -> str:
 
 
 def _separate_vision_base_url(config: AeroConfig) -> str:
-    if config.vision.base_url:
-        return config.vision.base_url
     profile = config.llm.providers.get(config.vision.provider.strip())
-    return profile.base_url if profile else ""
+    if profile and profile.base_url:
+        return profile.base_url
+    from aero.core.llm_providers import get_provider_preset
+
+    preset = get_provider_preset(config.vision.provider)
+    if preset is not None:
+        return preset.base_url
+    return config.vision.base_url
 
 
 def save_email_smtp_password(smtp_password: str) -> None:

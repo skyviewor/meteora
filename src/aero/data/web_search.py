@@ -17,53 +17,6 @@ WEB_SEARCH_GUIDE_URL = "https://help.aliyun.com/zh/model-studio/web-search-for-c
 ZHIPU_WEB_SEARCH_URL = "https://open.bigmodel.cn/api/paas/v4/web_search"
 
 
-def bailian_native_search_supported(model: str) -> bool:
-    """Return whether a Bailian model supports native web search.
-
-    Keep this allow-list narrow and tied to Model Studio's web-search support
-    list.  These models use DashScope's native Generation API so Aero can
-    receive source URLs; other providers/models retain the external-search
-    route when one is configured.
-    """
-    normalized = model.strip().lower()
-    # Keep this allow-list tied to the Model Studio web-search documentation.
-    # Qwen and the currently listed Bailian DeepSeek V4 variants support basic
-    # model-side web search.  Aero intentionally uses the portable ``turbo``
-    # search strategy rather than model-specific advanced strategies.
-    prefixes = (
-        "qwen-plus", "qwen-flash", "qwen3.5-plus", "qwen3.5-flash",
-        "qwen3.5-omni", "qwen3.6-plus", "qwen3.6-flash", "qwen3.7-plus",
-        "qwen3.7-flash",
-        "qwen3-max",
-        "deepseek-v4-flash", "deepseek-v4-pro",
-    )
-    return normalized.startswith(prefixes)
-
-
-def bailian_native_search_uses_multimodal_generation(model: str) -> bool:
-    """Return whether a native-search model needs DashScope's multimodal API.
-
-    The Qwen 3.5 and Qwen 3.7 multimodal families are routed here.  Their
-    native web-search protocol is *not* the text-generation protocol: it must use
-    ``multimodal-generation``, a list-based message content value, streaming
-    with ``incremental_output``, and the ``agent`` search strategy.
-
-    Sending one of these models to ``text-generation`` returns Model Studio's
-    ``url error, please check url`` response, rather than a descriptive model
-    capability error.  Keep this list explicit and covered by endpoint tests.
-    """
-    normalized = model.strip().lower()
-    prefixes = (
-        "qwen3.5-plus",
-        "qwen3.5-flash",
-        "qwen3.5-omni",
-        "qwen3.7-plus",
-        "qwen3.7-flash",
-        "qwen3-vl-",
-        "qwen-vl-",
-    )
-    return normalized.startswith(prefixes)
-
 _URL_RE = re.compile(r"https?://[^\s<>'\"\])}]+")
 _QUERY_FIELDS = ("query", "q", "keyword", "keywords", "search_query")
 _LIMIT_FIELDS = ("count", "limit", "top_k", "max_results", "num_results")

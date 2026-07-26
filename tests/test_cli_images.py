@@ -13,6 +13,7 @@ from aero.cli.main import (
     InlineImageAttachment,
 )
 from aero.core.config import AeroConfig
+from aero.data.pricing import TokenTracker
 
 
 def test_startup_logo_uses_aerolytica_branding():
@@ -107,6 +108,37 @@ def test_experiment_list_scrolls_to_bottom_after_markdown_layout():
             assert not chat.is_vertical_scroll_end
 
             app._show_experiment_list()
+            await pilot.pause(0.5)
+
+            assert chat.is_vertical_scroll_end
+            assert app._user_scrolled_up is False
+
+    asyncio.run(check_scroll())
+
+
+def test_billing_scrolls_to_bottom_after_markdown_layout():
+    from types import SimpleNamespace
+
+    async def check_scroll():
+        app = AeroApp(AeroConfig(), persist_config=False)
+        app.agent = SimpleNamespace(tracker=TokenTracker())
+
+        async with app.run_test(size=(100, 24)) as pilot:
+            app._show_checkpoint_message(
+                "\n\n".join(
+                    f"历史记录 {index}：" + ("很长的账单前置内容" * 8)
+                    for index in range(80)
+                )
+            )
+            await pilot.pause(0.1)
+
+            chat = app.query_one("#chat-area", ChatScroll)
+            chat.scroll_home(animate=False, force=True, immediate=True)
+            app._user_scrolled_up = True
+            await pilot.pause()
+            assert not chat.is_vertical_scroll_end
+
+            await app._handle_bill_command()
             await pilot.pause(0.5)
 
             assert chat.is_vertical_scroll_end

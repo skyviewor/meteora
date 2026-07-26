@@ -18,20 +18,6 @@ from aero.toolbox.registry import register_tool
 async def check_web_search_status() -> dict:
     """Check web-search availability without submitting a search query."""
     config = find_config()
-    from aero.data.web_search import bailian_native_search_supported
-    if (
-        config.web_search.enabled
-        and config.llm.provider == "bailian"
-        and bailian_native_search_supported(config.llm.model)
-    ):
-        return {
-            "available": True,
-            "native": True,
-            "api_key_configured": True,
-            "credential_reused": True,
-            "provider": "阿里云百炼模型内置联网搜索",
-            "message": "当前模型支持内置联网搜索，模型会在需要时自动调用。",
-        }
     provider = (config.web_search.provider or "bailian").strip().lower()
     if provider not in {"bailian", "zhipu"}:
         return {
@@ -208,6 +194,14 @@ async def search_web(
             _exception_text(exc), credential_reused=credential_reused, provider=provider
         )
 
+    from aero.data.pricing import record_service_cost
+
+    # Directory prices as of 2026-07: Bailian WebSearch MCP ¥29/1K calls;
+    # Zhipu search_std ¥0.01/call. Provider free quotas cannot be observed here.
+    record_service_cost(
+        f"web_search:{provider}",
+        unit_price=0.029 if provider == "bailian" else 0.01,
+    )
     result.update(
         {
             "query": query.strip(),

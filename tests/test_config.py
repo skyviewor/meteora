@@ -644,6 +644,28 @@ def test_reused_vision_snapshot_survives_text_model_switch(tmp_path, monkeypatch
     assert resolved.api_key == "sk-bailian"
 
 
+def test_vision_provider_profile_overrides_stale_cross_provider_base_url(
+    tmp_path, monkeypatch
+):
+    from aero.core.config import resolved_vision_config
+
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
+    config = AeroConfig.create_default()
+    bailian = config.llm.provider_config("bailian")
+    bailian.api_key = "sk-bailian"
+    bailian.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    config.vision.mode = "separate"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen3.7-plus"
+    config.vision.base_url = "https://api.moonshot.cn/v1"
+
+    resolved = resolved_vision_config(config)
+
+    assert resolved is not None
+    assert resolved.api_key == "sk-bailian"
+    assert resolved.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
 def test_reuse_profile_drops_a_stale_dedicated_vision_key(tmp_path, monkeypatch):
     from aero.core.config import load_user_secrets, save_vision_api_key, save_vision_profile
 

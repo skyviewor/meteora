@@ -75,8 +75,9 @@ class CDSDownloadStore:
         kwargs.setdefault("source", "cds")
         if "variables" in kwargs and isinstance(kwargs["variables"], list):
             kwargs["variables"] = json.dumps(kwargs["variables"], ensure_ascii=False)
-        if "area" in kwargs and isinstance(kwargs["area"], (list, dict)):
-            kwargs["area"] = json.dumps(kwargs["area"])
+        for field in ("area", "pressure_level"):
+            if field in kwargs and isinstance(kwargs[field], (list, dict)):
+                kwargs[field] = json.dumps(kwargs[field])
         columns = ", ".join(kwargs.keys())
         placeholders = ", ".join("?" for _ in kwargs)
         conn = self._connect()
@@ -93,8 +94,9 @@ class CDSDownloadStore:
         kwargs["updated_at"] = self._now()
         if "variables" in kwargs and isinstance(kwargs["variables"], list):
             kwargs["variables"] = json.dumps(kwargs["variables"], ensure_ascii=False)
-        if "area" in kwargs and isinstance(kwargs["area"], (list, dict)):
-            kwargs["area"] = json.dumps(kwargs["area"])
+        for field in ("area", "pressure_level"):
+            if field in kwargs and isinstance(kwargs[field], (list, dict)):
+                kwargs[field] = json.dumps(kwargs[field])
         conds = " AND ".join(f"{k}=?" for k in where)
         sets = ", ".join(f"{k}=?" for k in kwargs)
         conn = self._connect()
@@ -208,7 +210,7 @@ class CDSDownloadStore:
     @staticmethod
     def _row_to_dict(row: sqlite3.Row) -> dict:
         d = dict(row)
-        for field in ("variables", "area"):
+        for field in ("variables", "area", "pressure_level"):
             if d.get(field) and isinstance(d[field], str):
                 try:
                     d[field] = json.loads(d[field])

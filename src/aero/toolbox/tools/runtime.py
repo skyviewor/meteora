@@ -71,12 +71,23 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
 
     conda = manager.find_conda_executable(env)
     if conda is None:
-        return {
-            "status": "error",
-            "message": "Aero 私有运行时尚未安装，请先运行 aero setup。",
-            "missing_tools": missing,
-            "verified": verified,
-        }
+        import asyncio
+
+        from aero.cli.init_runtime import ensure_micromamba
+
+        emit_progress("Aero 私有运行时不存在，正在重新下载托管 Micromamba")
+        managed_micromamba = await asyncio.to_thread(ensure_micromamba)
+        if managed_micromamba is None:
+            return {
+                "status": "error",
+                "message": (
+                    "Aero 托管 Micromamba 下载失败。未使用、也不会回退到用户的 "
+                    "Conda/Mamba；请检查网络后重试或运行 aero setup。"
+                ),
+                "missing_tools": missing,
+                "verified": verified,
+            }
+        conda = str(managed_micromamba)
 
     env_bin = runtime_bin_path()
 
@@ -215,6 +226,8 @@ async def ensure_runtime_tools(tools: list[str]) -> dict:
         "通常不需要手动 conda activate。"
         "凡是通过 run_shell 执行 python/python3/pip/pip3/python -m pip，都必须解析到 aero-agent；"
         "不要用 base、系统 Python 或绝对路径绕过该环境。"
+        "cnmaps 是 pip-only 包，绝不能放入 conda/mamba install；"
+        "必须用 aero-agent 的 python -m pip install -U cnmaps。"
         "远程数据下载应优先用内置下载工具；CAMS/ADS、CDS/ERA5、GFS/NOMADS/AWS 等"
         "已有专用工具覆盖的数据源，不要用 curl/wget/head/grep 抓网页或 API 查参数。"
         "只有内置工具完全覆盖不了的数据源，才使用 curl、wget、aria2c 或数据源官方 CLI，"
@@ -283,6 +296,12 @@ async def run_shell(
     covered_data_error = _covered_data_shell_error(command)
     if covered_data_error:
         return covered_data_error
+    cnmaps_install_error = _cnmaps_conda_install_error(command)
+    if cnmaps_install_error:
+        return cnmaps_install_error
+    user_conda_error = _user_conda_runtime_error(command)
+    if user_conda_error:
+        return user_conda_error
     python_error = _python_runtime_error(command, env)
     if python_error:
         return python_error
@@ -511,6 +530,66 @@ def _secrets_shell_error(command: str) -> dict | None:
             "ERA5/CDS 用 check_cds_config，MERRA-2/Earthdata 用 check_earthdata_config。"
         ),
         "suggested_tools": ["check_ads_config", "check_cds_config", "check_earthdata_config"],
+        "command": _redact_shell_command(command),
+    }
+
+
+def _cnmaps_conda_install_error(command: str) -> dict | None:
+    """Keep pip-only cnmaps packages out of conda/mamba transactions."""
+    has_cnmaps = re.search(r"(?<![\w-])cnmaps(?:-data)?(?![\w-])", command, re.IGNORECASE)
+    conda_install = re.search(
+        r"(?:^|[\s;&|])(?:[^\s;&|]*/)?(?:conda|mamba|micromamba)"
+        r"\s+(?:install|create)\b",
+        command,
+        re.IGNORECASE,
+    )
+    if not has_cnmaps or not conda_install:
+        return None
+    pip_command = f"{runtime_bin_path() / 'python'} -m pip install -U cnmaps"
+    return {
+        "status": "error",
+        "cnmaps_conda_install_blocked": True,
+        "message": (
+            "cnmaps 是 pip-only 包，不能通过 conda 或 mamba 安装。"
+            "请从 conda/mamba 包列表中移除 cnmaps；其他依赖可继续用 conda/mamba，"
+            "然后单独使用 aero-agent 的 Python 通过 pip 安装 cnmaps。"
+        ),
+        "suggested_command": pip_command,
+        "command": _redact_shell_command(command),
+    }
+
+
+def _user_conda_runtime_error(command: str) -> dict | None:
+    """Reject shell access to user Conda/Mamba installations."""
+    package_manager = re.search(
+        r"(?:^|[\s;&|])(?P<executable>[^\s;&|]*(?:conda|mamba|micromamba))"
+        r"\s+(?:create|install|env\s+update)\b",
+        command,
+        re.IGNORECASE,
+    )
+    if package_manager is None:
+        return None
+
+    executable = package_manager.group("executable")
+    from aero.core.runtime_paths import micromamba_path
+
+    managed = str(micromamba_path())
+    has_managed_scope = (
+        executable == managed
+        and f"--root-prefix {runtime_root()}" in command
+        and f"--prefix {runtime_env_path()}" in command
+    )
+    if has_managed_scope:
+        return None
+    return {
+        "status": "error",
+        "user_conda_blocked": True,
+        "message": (
+            "禁止使用用户的 Conda/Mamba 或其 base 环境。缺少 aero-agent 环境时，"
+            "请调用 ensure_runtime_tools；它会自动下载 Aero 托管 Micromamba，并在 "
+            f"{runtime_env_path()} 重建隔离环境。"
+        ),
+        "suggested_tool": "ensure_runtime_tools",
         "command": _redact_shell_command(command),
     }
 

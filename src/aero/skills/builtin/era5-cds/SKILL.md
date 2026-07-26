@@ -11,9 +11,27 @@ submission error.
 
 ## Request rules
 
-- Use a pressure-level dataset and provide `pressure_level` for high-air
-  variables such as `potential_vorticity`. Do not use a pressure level for
-  single-level variables.
+- Use a pressure-level dataset and provide `pressure_levels` for high-air
+  variables. For several levels on the same date/time, area, format, and
+  variable group, submit one request such as
+  `pressure_levels=[1000, 925, 850, 700, 600, 500, 400]`. Never loop over
+  levels or submit one CDS job per level. `pressure_level` remains only for
+  backward-compatible single-level calls.
+- Keep pressure-level and single-level variables in separate requests because
+  they belong to different CDS datasets. For example, upper-air wind and
+  geopotential can share one multi-level pressure request, while surface
+  geopotential requires one separate single-level request.
+- Split a pressure-level request only when its date/time span, spatial domain,
+  variable count, or expected output is genuinely large enough to risk CDS
+  request limits. Prefer splitting by time period or variable group, not by
+  individual pressure level.
+- For a vertical cross-section, request enough standard pressure levels to
+  resolve the intended structure; do not substitute a sparse set merely to
+  minimize downloads. Batch those levels in one request. Request `geopotential`
+  for pressure-level terrain masking and surface `geopotential` separately.
+  Request `vertical_velocity` when the requested vectors are meant to represent
+  circulation in a pressure-coordinate section. Horizontal `(u, v)` alone does
+  not provide the vertical vector component.
 - For an hourly request for one date, preserve the complete date tuple:
   `year`, `month`, `day`, and the requested `time` list. A selected time must
   not silently remove the requested day.

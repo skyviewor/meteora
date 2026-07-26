@@ -8,6 +8,7 @@ from aero.adapters.cds_adapter import CDSAdapter, _detect_file_format
 from aero.toolbox.tools.era5 import (
     _era5_time_request_overrides,
     _is_non_retryable_cds_submit_error,
+    _normalize_pressure_levels,
 )
 
 
@@ -38,6 +39,50 @@ def test_custom_era5_time_keeps_complete_single_day_request():
     assert request["download_format"] == "unarchived"
     assert request["variable"] == ["potential_vorticity"]
     assert request["pressure_level"] == ["250"]
+
+
+def test_era5_request_combines_multiple_pressure_levels():
+    adapter = CDSAdapter(cds_url="https://example.com", cds_key="secret")
+
+    request = adapter._build_request(
+        "reanalysis-era5-pressure-levels",
+        ["u_component_of_wind", "v_component_of_wind", "geopotential"],
+        2026,
+        7,
+        20,
+        [1000, 925, 850, 700, 600, 500, 400],
+        [40, 75, 25, 105],
+        "netcdf",
+        None,
+    )
+    path = adapter._build_dest_path(
+        "reanalysis-era5-pressure-levels",
+        ["u_component_of_wind"],
+        2026,
+        7,
+        20,
+        [1000, 925, 850, 700, 600, 500, 400],
+        "netcdf",
+    )
+
+    assert request["pressure_level"] == ["1000", "925", "850", "700", "600", "500", "400"]
+    assert "pl1000-925-850-700-600-500-400" in path.name
+
+
+def test_pressure_level_normalization_prefers_plural_for_multi_level_requests():
+    assert _normalize_pressure_levels(
+        pressure_level=None,
+        pressure_levels=[1000, 925, 850, 850, 500],
+    ) == [1000, 925, 850, 500]
+    assert _normalize_pressure_levels(
+        pressure_level=500,
+        pressure_levels=None,
+    ) == [500]
+    with pytest.raises(ValueError, match="不能同时传"):
+        _normalize_pressure_levels(
+            pressure_level=500,
+            pressure_levels=[850, 500],
+        )
 
 
 def test_invalid_cds_request_is_not_retried():

@@ -559,6 +559,21 @@ class SecretInputAction(Static):
     can_focus = True
 
 
+class SecretTextArea(TextArea):
+    """Multiline secret editor where Enter submits and Shift+Enter adds a line."""
+
+    BINDINGS = [
+        Binding("enter", "submit_secret", show=False, priority=True),
+        Binding("shift+enter", "newline", show=False, priority=True),
+        *TextArea.BINDINGS,
+    ]
+
+    def action_submit_secret(self) -> None:
+        screen = self.screen
+        if isinstance(screen, SecretInputScreen):
+            screen.action_submit()
+
+
 class SecretInputScreen(ModalScreen[str | None]):
     """Local-only entry surface for a secret requested by a tool."""
 
@@ -603,7 +618,7 @@ class SecretInputScreen(ModalScreen[str | None]):
             yield Static(self._request.title, id="secret-input-title")
             yield Static(self._request.instructions, id="secret-input-note")
             if self._request.multiline:
-                yield TextArea(id="secret-input-value", show_line_numbers=False)
+                yield SecretTextArea(id="secret-input-value", show_line_numbers=False)
             else:
                 yield Input(password=True, id="secret-input-value")
             with Horizontal(id="secret-input-actions"):
@@ -614,7 +629,11 @@ class SecretInputScreen(ModalScreen[str | None]):
                     "取消", id="secret-input-cancel", classes="secret-input-action"
                 )
             yield Static(
-                "Tab 切换到操作 · ←→ 选择 · Enter 确认 · Esc 取消",
+                (
+                    "Enter 确认保存 · Shift+Enter 换行 · Tab 切换到操作 · Esc 取消"
+                    if self._request.multiline
+                    else "Enter 确认保存 · Tab 切换到操作 · Esc 取消"
+                ),
                 id="secret-input-hint",
             )
 
@@ -642,7 +661,7 @@ class SecretInputScreen(ModalScreen[str | None]):
             event.stop()
             event.prevent_default()
             self._focus_actions()
-        elif event.key == "enter" and not self._request.multiline:
+        elif event.key == "enter":
             event.stop()
             event.prevent_default()
             self.action_submit()
@@ -2036,6 +2055,7 @@ class AeroApp(App):
         new_agent = AgentLoop(self.config)
         new_agent.messages = copy.deepcopy(state.base_messages)
         new_agent.always_allow = set(getattr(state.agent, "always_allow", set()))
+        new_agent.tracker = state.agent.tracker
         self.agent = new_agent
         self._agent_worker = None
         self._main_run_state = None
@@ -2401,6 +2421,7 @@ class AeroApp(App):
             chat.remove_children()
             if self.agent:
                 self.agent.messages = [self.agent.messages[0]]
+                self.agent.tracker = TokenTracker()
             self._last_reply_text = ""
             self._status_msg = None
             self._status_sessions = []
@@ -2470,6 +2491,11 @@ class AeroApp(App):
 
         if text == "/websearch" or text.startswith("/websearch "):
             await self._handle_websearch_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text in {"/bill", "/billing"}:
+            await self._handle_bill_command()
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -2555,6 +2581,11 @@ class AeroApp(App):
 
         if text == "/instructions" or text.startswith("/instructions "):
             await self._handle_instructions_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if _is_billing_query(text):
+            await self._handle_bill_command(user_text=text)
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -3044,6 +3075,7 @@ class AeroApp(App):
 
     def _refresh_commands(self) -> None:
         self._commands_list = [
+            ("/bill", t("cmd.bill", self.config.language)),
             ("/clear", t("cmd.clear", self.config.language)),
             ("/copy", t("cmd.copy", self.config.language)),
             ("/help", t("cmd.help", self.config.language)),
@@ -3339,6 +3371,10 @@ class AeroApp(App):
         self.config.vision.mode = "separate"
         self.config.vision.provider = "bailian"
         self.config.vision.model = model
+        bailian_profile = self.config.llm.provider_config("bailian")
+        self.config.vision.base_url = (
+            bailian_profile.base_url or get_provider_preset("bailian").base_url
+        )
         save_vision_profile(
             "separate",
             provider=self.config.vision.provider,
@@ -3353,9 +3389,8 @@ class AeroApp(App):
         )
 
     async def _handle_websearch_command(self, text: str) -> None:
-        """Toggle native Bailian search or an external search service."""
+        """Toggle the explicitly configured external search service."""
         from aero.data.web_search import (
-            bailian_native_search_supported,
             check_bailian_web,
             search_zhipu_web,
         )
@@ -3404,26 +3439,10 @@ class AeroApp(App):
             save_web_search_state(enabled=False)
             if self.agent is not None:
                 self.agent.config.web_search.enabled = False
-                self.agent.llm.config.web_search_enabled = False
             self._set_footer_status("网页搜索已关闭。")
             return
 
         provider = (self.config.web_search.provider or "bailian").strip().lower()
-        native = (
-            self.config.llm.provider == "bailian"
-            and bailian_native_search_supported(self.config.llm.model)
-        )
-        if native:
-            self.config.web_search.enabled = True
-            save_web_search_state(enabled=True)
-            if self.agent is not None:
-                self.agent.config.web_search.enabled = True
-                self.agent.llm.config.web_search_enabled = True
-            self._set_footer_status(
-                f"网页搜索已开启，将优先使用 {self.config.llm.model} 的内置联网搜索。"
-            )
-            return
-
         # Search credentials are capability-scoped. Never silently reuse a
         # primary/vision key; ask for explicit authorization below.
         api_key = self.config.web_search.api_key.strip()
@@ -3466,7 +3485,6 @@ class AeroApp(App):
             save_web_search_state(enabled=True)
             if self.agent is not None:
                 self.agent.config.web_search.enabled = True
-                self.agent.llm.config.web_search_enabled = True
             self._set_footer_status("网页搜索已开启（已复用之前的连通性测试结果）。")
             return
         try:
@@ -3493,7 +3511,6 @@ class AeroApp(App):
         )
         if self.agent is not None:
             self.agent.config.web_search.enabled = True
-            self.agent.llm.config.web_search_enabled = True
         self._set_footer_status("网页搜索已开启，连通性测试通过。")
 
     def _websearch_reuse_candidate(self, provider: str) -> str:
@@ -3579,36 +3596,40 @@ class AeroApp(App):
 
     def _show_websearch_status(self) -> None:
         """Show local state without issuing a network request."""
-        from aero.data.web_search import bailian_native_search_supported
-
         if not self.config.web_search.enabled:
             self._show_checkpoint_message(
                 "### 网页搜索状态\n\n当前：**关闭**\n\n使用 `/websearch on` 开启。",
                 force_scroll=True,
             )
             return
-        native = (
-            self.config.llm.provider == "bailian"
-            and bailian_native_search_supported(self.config.llm.model)
+        provider = self.config.web_search.provider or "bailian"
+        verified = (
+            self.config.web_search.mcp_verified
+            and self.config.web_search.mcp_verified_provider == provider
         )
-        if native:
-            detail = (
-                f"当前：**已开启**\n\n优先路径：百炼模型内置联网搜索\n"
-                f"当前模型：`{self.config.llm.model}`\n"
-                "模型会在需要实时信息时自行决定是否搜索。"
-            )
-        else:
-            provider = self.config.web_search.provider or "bailian"
-            verified = (
-                self.config.web_search.mcp_verified
-                and self.config.web_search.mcp_verified_provider == provider
-            )
-            detail = (
-                f"当前：**已开启**\n\n外部搜索服务：`{provider}`\n"
-                f"API Key：{'已配置' if self.config.web_search.api_key else '未单独配置（可能复用视觉 Key）'}\n"
-                f"连通性测试：{'已通过' if verified else '未通过或未测试'}"
-            )
+        detail = (
+            f"当前：**已开启**\n\n外部搜索服务：`{provider}`\n"
+            f"API Key：{'已配置' if self.config.web_search.api_key else '未单独配置（可能复用视觉 Key）'}\n"
+            f"连通性测试：{'已通过' if verified else '未通过或未测试'}"
+        )
         self._show_checkpoint_message("### 网页搜索状态\n\n" + detail, force_scroll=True)
+
+    async def _handle_bill_command(self, *, user_text: str | None = None) -> None:
+        """Render the shared session cost ledger without making an LLM call."""
+        if user_text:
+            await self._mount_user_message(user_text)
+            self._chat_log.append(f"{t('label.user', self.config.language)}:\n{user_text}")
+        tracker = self.agent.tracker if self.agent is not None else TokenTracker()
+        message = _billing_markdown(tracker, self.config.language)
+        agent_msg = await self._mount_agent_message()
+        if isinstance(agent_msg, ChatMarkdown):
+            agent_msg.force_scroll_on_ready = True
+        await agent_msg.update(message)
+        self._last_reply_text = message
+        self._chat_log.append(f"Aero:\n{message}")
+        self._force_scroll_chat_to_end()
+        self.call_after_refresh(self._force_scroll_chat_to_end)
+        self.set_timer(0.05, self._force_scroll_chat_to_end)
 
     def _handle_mode_command(self, text: str) -> None:
         from aero.data.modes import MODE_LABELS, MODE_OPTIONS
@@ -5275,6 +5296,7 @@ class AeroApp(App):
         task.agent = sub_agent
         if self.agent is not None:
             sub_agent.always_allow = set(self.agent.always_allow)
+            sub_agent.tracker = self.agent.tracker
         prompt = _subagent_task_prompt(task)
         response_text = ""
         try:
@@ -7023,6 +7045,149 @@ def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
     return " [dim]|[/dim] " + " [dim]·[/dim] ".join(parts)
 
 
+def _billing_markdown(tracker: TokenTracker, language: str = "zh") -> str:
+    items = tracker.cost_breakdown()
+    total = tracker.total_cost()
+    zh = language == "zh"
+    title = "会话账单" if zh else "Session bill"
+    if not items:
+        empty = (
+            "当前会话尚未产生可计费调用。"
+            if zh
+            else "No billable usage in this session."
+        )
+        return f"## {title}\n\n{empty}"
+
+    headers = (
+        ("类型", "项目", "用量", "金额", "占比")
+        if zh
+        else ("Type", "Item", "Usage", "Cost", "Share")
+    )
+    lines = [
+        f"## {title}",
+        "",
+        f"| {' | '.join(headers)} |",
+        "|---|---|---:|---:|---:|",
+    ]
+    for item in items:
+        share = item.cost / total if total > 0 else 0
+        lines.append(
+            "| "
+            + " | ".join(
+                (
+                    _billing_kind_label(item.kind, zh),
+                    _billing_model_or_service_label(item, zh).replace("|", "\\|"),
+                    _billing_usage_text(item, zh),
+                    _format_bill_cost(item.cost),
+                    f"{share:.1%}",
+                )
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            f"**{'总计' if zh else 'Total'}：{_format_bill_cost(total)}**",
+            "",
+            (
+                "金额按当前目录价估算；供应商免费额度、套餐抵扣与活动优惠"
+                "不在本地可见。"
+                if zh
+                else (
+                    "Estimated at current list prices; provider free quotas, "
+                    "plans, and promotions are not visible locally."
+                )
+            ),
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _billing_kind_label(kind: str, zh: bool) -> str:
+    labels = {
+        "llm": ("文本模型", "Text model"),
+        "vision": ("视觉模型", "Vision model"),
+        "service": ("Web Search", "Web Search"),
+    }
+    pair = labels.get(kind, (kind, kind))
+    return pair[0] if zh else pair[1]
+
+
+def _billing_item_label(name: str, zh: bool) -> str:
+    labels = {
+        "web_search:bailian": ("百炼 WebSearch MCP", "Bailian WebSearch MCP"),
+        "web_search:zhipu": ("智谱 search_std", "Zhipu search_std"),
+    }
+    pair = labels.get(name)
+    if pair is None:
+        return name
+    return pair[0] if zh else pair[1]
+
+
+def _billing_model_or_service_label(item, zh: bool) -> str:
+    label = _billing_item_label(item.name, zh)
+    if item.kind == "service" or not item.provider:
+        return label
+    return f"{_display_provider_name(item.provider)} / {label}"
+
+
+def _billing_usage_text(item, zh: bool) -> str:
+    if item.kind == "service":
+        return f"{item.calls} {'次' if zh else 'calls'}"
+    total_tokens = item.prompt_tokens + item.completion_tokens
+    text = f"{format_token_count(total_tokens)} tokens"
+    if item.cached_tokens:
+        cache = format_token_count(item.cached_tokens)
+        text += f"（缓存 {cache}）" if zh else f" ({cache} cached)"
+    return text
+
+
+def _format_bill_cost(cost: float) -> str:
+    if cost >= 1:
+        return f"¥{cost:.2f}"
+    if cost >= 0.01:
+        return f"¥{cost:.3f}"
+    return f"¥{cost:.4f}"
+
+
+def _is_billing_query(text: str) -> bool:
+    """Recognize short, explicit natural-language requests for this session's bill."""
+    normalized = re.sub(r"[？?！!。,.，\s]+", "", text.strip().lower())
+    if not normalized or len(normalized) > 50:
+        return False
+    if any(
+        marker in normalized
+        for marker in ("财务账单", "银行账单", "信用卡账单", "发票", "异常交易")
+    ):
+        return False
+    exact_markers = (
+        "账单",
+        "费用明细",
+        "花费明细",
+        "成本明细",
+        "消费明细",
+        "费用占比",
+        "花费占比",
+        "成本占比",
+        "各模型花费",
+        "各模型费用",
+        "钱都花在哪里",
+        "花了多少钱",
+        "用了多少钱",
+        "本会话花费",
+        "会话花费",
+        "查看花费",
+        "查看费用",
+        "费用是多少",
+        "成本是多少",
+        "消费情况",
+        "sessionbill",
+        "costbreakdown",
+        "spendbreakdown",
+    )
+    return any(marker in normalized for marker in exact_markers)
+
+
 def _session_option_label(name: str, updated_at: float) -> str:
     updated = datetime.fromtimestamp(updated_at).astimezone().isoformat(timespec="minutes")
     return f"{escape(name[:40])} ({escape(updated)})"
@@ -7484,6 +7649,7 @@ def _help_text(lang: str) -> str:
         t("help.slash_variants", lang),
         t("help.slash_vision", lang),
         "  /websearch [on|off|status]  管理网页搜索开关并查看状态",
+        t("help.slash_bill", lang),
         t("help.slash_mode", lang),
         t("help.slash_session", lang),
         t("help.slash_session_rename", lang),
@@ -7757,7 +7923,58 @@ def _render_terminal_math(text: str) -> str:
         flags=re.DOTALL,
     )
     text = _repair_terminal_math_text(text)
-    return text
+    return _normalize_terminal_markdown_emphasis(text)
+
+
+def _normalize_terminal_markdown_emphasis(text: str) -> str:
+    """Make CJK-adjacent strong emphasis parse in Textual Markdown.
+
+    Textual treats ``中文**重点**后文`` as intraword delimiters and renders the
+    asterisks literally. Minimal boundary spaces make the emphasis unambiguous.
+    Code spans and fences stay intact.
+    """
+    rendered: list[str] = []
+    in_fence = False
+    fence_marker = ""
+    for line in text.splitlines(keepends=True):
+        fence = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if fence:
+            marker = fence.group(1)[0]
+            if not in_fence:
+                in_fence = True
+                fence_marker = marker
+            elif marker == fence_marker:
+                in_fence = False
+                fence_marker = ""
+            rendered.append(line)
+            continue
+        if in_fence:
+            rendered.append(line)
+            continue
+
+        parts = re.split(r"(`+[^`\n]*`+)", line)
+        for index in range(0, len(parts), 2):
+            parts[index] = _repair_cjk_strong_emphasis(parts[index])
+        rendered.append("".join(parts))
+    return "".join(rendered)
+
+
+def _repair_cjk_strong_emphasis(text: str) -> str:
+    matches = list(re.finditer(r"\*\*(?=\S).+?(?<=\S)\*\*", text))
+    if not matches:
+        return text
+    rendered: list[str] = []
+    cursor = 0
+    for match in matches:
+        rendered.append(text[cursor : match.start()])
+        if match.start() > 0 and not text[match.start() - 1].isspace():
+            rendered.append(" ")
+        rendered.append(match.group())
+        if match.end() < len(text) and not text[match.end()].isspace():
+            rendered.append(" ")
+        cursor = match.end()
+    rendered.append(text[cursor:])
+    return "".join(rendered)
 
 
 def _latex_math_to_text(expr: str) -> str:
@@ -7995,7 +8212,11 @@ def main():
         from aero.cli.init_runtime import setup_runtime
 
         setup_args = sys.argv[2:]
-        unknown = [arg for arg in setup_args if arg not in {"--full", "--yes", "-y"}]
+        unknown = [
+            arg
+            for arg in setup_args
+            if arg not in {"--full", "--yes", "-y", "--china-mirror"}
+        ]
         if unknown:
             print(f"未知参数: {unknown[0]}")
             _print_usage()
@@ -8003,6 +8224,7 @@ def main():
         if not setup_runtime(
             full="--full" in setup_args,
             assume_yes="--yes" in setup_args or "-y" in setup_args,
+            china_mirror="--china-mirror" in setup_args,
         ):
             sys.exit(1)
     elif cmd == "doctor":
@@ -8046,6 +8268,7 @@ Aero — 气象科研 AI Agent IDE
   aero init            初始化当前目录的项目配置与工作目录
   aero setup           安装独立的基础科学运行时（Python 3.12）
   aero setup --full    预装完整科学计算工具集
+  aero setup --full --china-mirror  强制使用国内 Conda/PyPI 镜像
   aero doctor          检查 Aero 私有运行时
   aero runtime clean   删除 Aero 私有运行时（不影响项目和用户 Conda）
   aero chat            启动 Textual TUI 对话（支持中文输入和流式输出）

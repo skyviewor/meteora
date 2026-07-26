@@ -34,7 +34,7 @@ class CDSAdapter:
         year: int,
         month: int,
         day: int | None = None,
-        pressure_level: int | None = None,
+        pressure_level: int | list[int] | None = None,
         area: list[float] | None = None,
         data_format: str = "netcdf",
         request_overrides: dict | None = None,
@@ -200,7 +200,7 @@ class CDSAdapter:
         month: int,
         dest_dir: Path,
         day: int | None = None,
-        pressure_level: int | None = None,
+        pressure_level: int | list[int] | None = None,
         area: list[float] | None = None,
         data_format: str = "netcdf",
         request_overrides: dict | None = None,
@@ -252,13 +252,18 @@ class CDSAdapter:
     @staticmethod
     def _build_dest_path(
         dataset_id: str, variables: list[str], year: int, month: int,
-        day: int | None, pressure_level: int | None, data_format: str,
+        day: int | None, pressure_level: int | list[int] | None, data_format: str,
         *,
         area: list[float] | None = None,
         time: list[str] | None = None,
     ) -> Path:
         ext = ".grib" if data_format == "grib" else ".nc"
-        pl_str = f"pl{pressure_level}" if pressure_level else "sfc"
+        levels = pressure_level if isinstance(pressure_level, list) else [pressure_level]
+        pl_str = (
+            "pl" + "-".join(str(level) for level in levels if level is not None)
+            if pressure_level
+            else "sfc"
+        )
         var_str = "_".join(variables)
         date_str = f"{year}{month:02d}{day:02d}" if day else f"{year}{month:02d}"
         ds_short = dataset_id.replace("reanalysis-", "").replace("derived-", "")
@@ -273,7 +278,7 @@ class CDSAdapter:
 
     def _build_request(
         self, dataset_id: str, variables: list[str], year: int, month: int,
-        day: int | None, pressure_level: int | None, area: list[float] | None,
+        day: int | None, pressure_level: int | list[int] | None, area: list[float] | None,
         data_format: str, request_overrides: dict | None,
     ) -> dict:
         request: dict = {}
@@ -295,7 +300,8 @@ class CDSAdapter:
         if "month" not in request and "date" not in request:
             request["month"] = [f"{month:02d}"]
         if pressure_level and "pressure_level" not in request:
-            request["pressure_level"] = [str(pressure_level)]
+            levels = pressure_level if isinstance(pressure_level, list) else [pressure_level]
+            request["pressure_level"] = [str(level) for level in levels]
         if area and "area" not in request:
             request["area"] = area
         return request

@@ -23,7 +23,7 @@ from aero.core.debug_log import debug_log
 from aero.core.llm_providers import get_provider_preset
 from aero.core.types import Message, ToolCall
 from aero.data.modes import block_reason
-from aero.data.pricing import TokenTracker
+from aero.data.pricing import TokenTracker, use_token_tracker
 from aero.toolbox.registry import get_registry
 
 logger = structlog.get_logger()
@@ -1029,7 +1029,6 @@ class AgentLoop:
             reasoning_effort=config.llm.reasoning_effort,
             api_key=config.llm.active_api_key(),
             base_url=config.llm.base_url,
-            web_search_enabled=config.web_search.enabled,
         )
         self.llm = LLMClient(llm_cfg)
         self.runtime = Runtime()
@@ -1096,13 +1095,6 @@ class AgentLoop:
     def _allowed_tools(self) -> list[dict]:
         from aero.data.modes import filter_tool_functions
         tools = filter_tool_functions(self.registry.list_functions(), self.config.mode)
-        from aero.data.web_search import bailian_native_search_supported
-
-        native_search = (
-            self.config.web_search.enabled
-            and self.config.llm.provider == "bailian"
-            and bailian_native_search_supported(self.config.llm.model)
-        )
         allowed_destructive_memo_tools = _destructive_memo_tools_for_text(
             self._current_user_message
         )
@@ -1113,37 +1105,28 @@ class AgentLoop:
             not in ({"delete_memo", "clear_memos"} - allowed_destructive_memo_tools)
             and not (
                 tool.get("function", {}).get("name") == "search_web"
-                and (not self.config.web_search.enabled or native_search)
+                and not self.config.web_search.enabled
             )
         ]
 
     def _uses_bailian_native_web_search(self) -> bool:
-        """Whether this turn is delegated to Bailian's model-side search."""
-        from aero.data.web_search import bailian_native_search_supported
-
-        return bool(
-            self.config.web_search.enabled
-            and self.config.llm.provider == "bailian"
-            and bailian_native_search_supported(self.config.llm.model)
-        )
+        """Native model-side search is intentionally disabled."""
+        return False
 
     def _external_web_search_block_reason(self, tool_name: str) -> str | None:
-        """Keep native Bailian search from silently falling back to MCP.
-
-        Filtering the function definition from the request is necessary but not
-        sufficient: providers can still emit a stale/hallucinated tool call from
-        conversation context.  The runtime boundary must enforce the same rule
-        before any external credential or MCP service is touched.
-        """
-        if tool_name == "search_web" and self._uses_bailian_native_web_search():
-            return (
-                "当前已启用百炼模型内置联网搜索，已阻止外部网页搜索调用。"
-                "请直接使用模型内置搜索完成本轮回答，不要回退到 MCP。"
-            )
+        """Never block the explicit search tool in favor of model-side search."""
         return None
 
     async def close(self):
         await self.llm.close()
+
+    def _record_llm_usage(self, usage: dict | None) -> None:
+        self.tracker.add_llm(
+            usage,
+            self.config.llm.model,
+            provider=self.config.llm.provider,
+            occurred_at=self.llm.last_request_started_at,
+        )
 
     async def run(self, user_message: str) -> str:
         """Process a user message and return the agent's response (non-streaming)."""
@@ -1162,7 +1145,7 @@ class AgentLoop:
         try:
             text, tool_calls = await self.llm.chat_with_tools(self.messages, tools)
             self._record_llm_references()
-            self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
+            self._record_llm_usage(self.llm.last_usage)
             debug_log(
                 "agent.llm_response",
                 mode="non_stream",
@@ -1210,15 +1193,6 @@ class AgentLoop:
         self.messages.append(Message(role="user", content=user_message))
         tools = self._allowed_tools()
 
-        if self._uses_bailian_native_web_search():
-            yield StreamEvent(
-                type="status",
-                content=(
-                    f"已启用 {self.config.llm.model} 的模型内置联网搜索；"
-                    "模型会仅在需要实时信息时自行检索。"
-                ),
-            )
-
         try:
             accumulated_text = ""
             tool_calls: list[ToolCall] = []
@@ -1237,7 +1211,7 @@ class AgentLoop:
                 elif event.type == "references":
                     self._record_reference_urls(event.references)
                 elif event.type == "done":
-                    self.tracker.add_llm(event.usage, self.config.llm.model)
+                    self._record_llm_usage(event.usage)
 
             tail = text_sanitizer.flush()
             if tail:
@@ -1415,7 +1389,8 @@ class AgentLoop:
 
             for tc in calls:
                 parsed_args = self._parse_tool_args(tc)
-                exec_result = await self.runtime.execute(spec.function, parsed_args)
+                with use_token_tracker(self.tracker):
+                    exec_result = await self.runtime.execute(spec.function, parsed_args)
                 if exec_result.success:
                     self._apply_runtime_config_update(tc.name, exec_result.result)
                     if self.config.mode == "execute" and tc.name in _BUILD_TOOLS:
@@ -1437,7 +1412,11 @@ class AgentLoop:
         from aero.toolbox.builtin_tools import get_vision_usage, reset_vision_usage
         vision_usage = get_vision_usage()
         if vision_usage:
-            self.tracker.add_vision(vision_usage, self.config.vision.model)
+            self.tracker.add_vision(
+                vision_usage,
+                self.config.vision.model,
+                provider=self.config.vision.provider,
+            )
             reset_vision_usage()
 
         if self._direct_response:
@@ -1447,7 +1426,7 @@ class AgentLoop:
 
         response = _sanitize_user_facing_text(await self.llm.chat(self.messages))
         self._record_llm_references()
-        self.tracker.add_llm(self.llm.last_usage, self.config.llm.model)
+        self._record_llm_usage(self.llm.last_usage)
         response = _inject_refs_if_missing(response, self._ref_urls)
         self.messages.append(Message(role="assistant", content=response))
         return response
@@ -1477,7 +1456,11 @@ class AgentLoop:
             from aero.toolbox.builtin_tools import get_vision_usage, reset_vision_usage
             vision_usage = get_vision_usage()
             if vision_usage:
-                self.tracker.add_vision(vision_usage, self.config.vision.model)
+                self.tracker.add_vision(
+                    vision_usage,
+                    self.config.vision.model,
+                    provider=self.config.vision.provider,
+                )
                 reset_vision_usage()
 
             if self._direct_response:
@@ -1508,7 +1491,7 @@ class AgentLoop:
                 elif event.type == "references":
                     self._record_reference_urls(event.references)
                 elif event.type == "done":
-                    self.tracker.add_llm(event.usage, self.config.llm.model)
+                    self._record_llm_usage(event.usage)
 
             tail = text_sanitizer.flush()
             if tail:
@@ -1699,7 +1682,7 @@ class AgentLoop:
             queue,
             self._cancel_event,
         )
-        with use_progress_reporter(reporter):
+        with use_progress_reporter(reporter), use_token_tracker(self.tracker):
             task = asyncio.create_task(self.runtime.execute(spec.function, parsed_args))
             while not task.done():
                 if self._cancel_event is not None and self._cancel_event.is_set():
@@ -1822,8 +1805,6 @@ class AgentLoop:
         self.llm.config.model = model
         self.llm.config.base_url = base_url
         self.llm.config.api_key = self.config.llm.active_api_key()
-        self.llm.config.web_search_enabled = self.config.web_search.enabled
-
         # The raw API key is intentionally not included in the tool result sent to
         # the LLM. Reload it from the just-saved project config instead.
         try:

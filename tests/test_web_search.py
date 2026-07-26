@@ -123,6 +123,28 @@ async def test_search_web_reuses_vision_key_without_returning_it(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_successful_web_search_records_session_service_cost(monkeypatch):
+    from aero.data.pricing import TokenTracker, use_token_tracker
+
+    config = AeroConfig.create_default()
+    config.web_search.provider = "zhipu"
+    config.web_search.api_key = "sk-zhipu-secret"
+    monkeypatch.setattr(web_search, "find_config", lambda: config)
+
+    async def fake_search(*args, **kwargs):
+        return {"found": True, "results": [], "content": "result", "references": []}
+
+    monkeypatch.setattr(web_search, "search_zhipu_web", fake_search)
+    tracker = TokenTracker()
+
+    with use_token_tracker(tracker):
+        await web_search.search_web("杭州天气")
+
+    assert tracker.service_cost == 0.01
+    assert tracker.to_dict()["service_usage"]["web_search:zhipu"]["calls"] == 1
+
+
+@pytest.mark.asyncio
 async def test_search_web_uses_its_own_credential_before_vision(monkeypatch):
     config = AeroConfig.create_default()
     config.web_search.api_key = "sk-search-secret"
@@ -311,11 +333,7 @@ def test_web_search_status_is_registered_without_confirmation():
     assert spec is not None
     assert spec.requires_confirmation is False
 
-def test_bailian_native_search_capability_is_model_specific():
-    from aero.data.web_search import bailian_native_search_supported
+def test_bailian_native_search_capability_is_removed():
+    import aero.data.web_search as web_search
 
-    assert bailian_native_search_supported("qwen3.7-plus") is True
-    assert bailian_native_search_supported("qwen3.7-flash") is True
-    assert bailian_native_search_supported("deepseek-v4-flash") is True
-    assert bailian_native_search_supported("deepseek-v4-pro") is True
-    assert bailian_native_search_supported("glm-5.2") is False
+    assert not hasattr(web_search, "bailian_native_search_supported")

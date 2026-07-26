@@ -1,11 +1,13 @@
 """Tests for Aero's private Micromamba runtime."""
 
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
 
 from aero.cli import init_runtime
+from aero.core import runtime_paths
 
 
 def completed(command: list[str], returncode: int = 0, stdout: str = ""):
@@ -18,6 +20,36 @@ def configure_runtime(monkeypatch, tmp_path: Path) -> tuple[Path, Path, Path]:
     env = root / "envs" / "aero-agent"
     monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
     return root, micromamba, env
+
+
+def test_setup_runtime_interactively_persists_custom_root(monkeypatch, tmp_path):
+    home = tmp_path / "aero-home"
+    custom = tmp_path / "large-disk" / "aero-runtime"
+    monkeypatch.setenv("AERO_HOME", str(home))
+    monkeypatch.delenv("AERO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(init_runtime.sys.stdin, "isatty", lambda: True)
+    answers = iter([str(custom), ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(init_runtime, "ensure_micromamba", lambda: None)
+
+    assert init_runtime.setup_runtime() is False
+    assert (home / runtime_paths.RUNTIME_ROOT_CONFIG).read_text().strip() == str(custom)
+    assert runtime_paths.runtime_root() == custom
+
+
+def test_setup_runtime_interactive_empty_path_keeps_default(monkeypatch, tmp_path):
+    home = tmp_path / "aero-home"
+    monkeypatch.setenv("AERO_HOME", str(home))
+    monkeypatch.delenv("AERO_RUNTIME_ROOT", raising=False)
+    monkeypatch.setattr(init_runtime.sys.stdin, "isatty", lambda: True)
+    answers = iter(["", ""])
+    monkeypatch.setattr("builtins.input", lambda _prompt: next(answers))
+    monkeypatch.setattr(init_runtime, "ensure_micromamba", lambda: None)
+
+    assert init_runtime.setup_runtime() is False
+    expected = (home / "runtime").resolve()
+    assert runtime_paths.runtime_root() == expected
+    assert (home / runtime_paths.RUNTIME_ROOT_CONFIG).read_text().strip() == str(expected)
 
 
 def test_setup_runtime_creates_private_python_312_environment(monkeypatch, tmp_path):
@@ -39,6 +71,21 @@ def test_setup_runtime_creates_private_python_312_environment(monkeypatch, tmp_p
     assert ["--root-prefix", str(root)] == calls[0][3:5]
     assert ["--prefix", str(env)] == calls[0][5:7]
     assert "python=3.12" in calls[0]
+
+
+def test_setup_runtime_china_mirror_forces_mainland_package_sources(
+    monkeypatch, tmp_path, capsys
+):
+    root, micromamba, env = configure_runtime(monkeypatch, tmp_path)
+    micromamba.parent.mkdir(parents=True)
+    micromamba.write_text("")
+    (env / "bin").mkdir(parents=True)
+    (env / "bin" / "python").write_text("")
+
+    assert init_runtime.setup_runtime(china_mirror=True, assume_yes=True) is True
+
+    assert "大陆镜像" in capsys.readouterr().out
+    assert os.environ.get("AERO_NETWORK_REGION") is None
 
 
 def test_setup_runtime_full_installs_conda_then_pip_packages(monkeypatch, tmp_path):
@@ -82,6 +129,26 @@ def test_ensure_micromamba_extracts_managed_binary(monkeypatch, tmp_path):
     assert micromamba.stat().st_mode & 0o111
 
 
+def test_installer_subprocess_streams_output_to_terminal(monkeypatch, tmp_path):
+    root, _micromamba, _env = configure_runtime(monkeypatch, tmp_path)
+    captured = {}
+
+    def fake_subprocess_run(command, **kwargs):
+        captured.update(kwargs)
+        return completed(command)
+
+    monkeypatch.setattr(init_runtime.subprocess, "run", fake_subprocess_run)
+
+    init_runtime._run(["installer", "--verbose"], timeout=30)
+
+    assert captured["timeout"] == 30
+    assert captured["check"] is False
+    assert captured["env"]["MAMBA_ROOT_PREFIX"] == str(root)
+    assert "capture_output" not in captured
+    assert "stdout" not in captured
+    assert "stderr" not in captured
+
+
 def test_clean_runtime_only_removes_private_runtime(monkeypatch, tmp_path):
     root, _micromamba, _env = configure_runtime(monkeypatch, tmp_path)
     project = tmp_path / "project"
@@ -118,8 +185,11 @@ def test_common_package_files_keep_cnmaps_pip_only():
     assert init_runtime._pip_packages() == ("mplfonts", "cnmaps")
 
 
-def test_conda_helper_documents_python_312_and_pip_only_cnmaps():
+def test_conda_helper_documents_managed_runtime_and_pip_only_cnmaps():
     skill_text = Path("src/aero/skills/builtin/conda-helper/SKILL.md").read_text()
-    assert "python=3.12" in skill_text
-    assert "`cnmaps` is pip-only" in skill_text
-    assert "Never install `cnmaps` with conda or mamba" in skill_text
+    assert "~/.aero/runtime/bin/micromamba" in skill_text
+    assert "~/.aero/runtime/envs/aero-agent/bin/python" in skill_text
+    assert "ensure_runtime_tools" in skill_text
+    assert "`cnmaps` is always pip-only" in skill_text
+    assert "Never run `conda create`, `conda install`, or `conda activate`" in skill_text
+    assert "conda create -n aero-agent" not in skill_text

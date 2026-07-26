@@ -58,6 +58,28 @@ async def test_secret_input_keyboard_actions_do_not_require_mouse():
     assert result == [None]
 
 
+@pytest.mark.asyncio
+async def test_multiline_secret_input_enter_submits_without_adding_newline():
+    app = AeroApp(AeroConfig.create_default(), persist_config=False)
+    result: list[str | None] = []
+    request = SecretInputRequest("cds", "输入 CDS API 凭证", "instructions", True)
+    credentials = (
+        "url: https://cds.climate.copernicus.eu/api\n"
+        "key: ee3a1234-5678-9012"
+    )
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        app.push_screen(SecretInputScreen(request), callback=result.append)
+        await pilot.pause()
+        area = app.screen.query_one("#secret-input-value")
+        area.load_text(credentials)
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert result == [credentials]
+
+
 def test_extract_official_cds_two_line_credentials_before_generic_api_key():
     text = "url: https://cds.climate.copernicus.eu/api\nkey: ee3a1234-5678-9012"
 
@@ -176,7 +198,8 @@ def test_detect_primary_vision_reuse_request():
 
 
 @pytest.mark.asyncio
-async def test_reuse_primary_vision_uses_active_kimi_profile():
+async def test_reuse_primary_vision_uses_active_kimi_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
     config = AeroConfig.create_default()
     config.llm.provider = "kimi"
     kimi = config.llm.provider_config("kimi")
@@ -282,13 +305,17 @@ def test_input_meta_migrates_legacy_deepseek_chat_to_flash(tmp_path, monkeypatch
     assert "DeepSeek Chat" not in text
 
 
-def test_model_status_omits_duplicate_reused_vision_model():
+def test_model_status_omits_duplicate_reused_vision_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("AERO_SECRETS_PATH", str(tmp_path / "secrets.yaml"))
     config = AeroConfig.create_default()
     config.llm.provider = "bailian"
     config.llm.model = "qwen3.7-flash"
     config.llm.supports_vision = True
     config.llm.set_active_api_key("sk-test")
     config.vision.mode = "reuse_primary"
+    config.vision.provider = "bailian"
+    config.vision.model = "qwen3.7-flash"
+    config.vision.base_url = config.llm.base_url
     app = AeroApp(config, persist_config=False)
 
     assert app._input_meta_text().count("qwen3.7-flash") == 1

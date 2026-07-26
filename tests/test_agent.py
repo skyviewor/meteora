@@ -1056,7 +1056,7 @@ async def test_agent_blocks_repeated_and_excessive_vision_analysis(tmp_path):
         await agent.close()
 
 
-def test_native_bailian_search_never_exposes_or_executes_external_search():
+def test_bailian_search_exposes_external_search_tool():
     from aero.agent.loop import AgentLoop
     from aero.toolbox import builtin_tools  # noqa: F401
 
@@ -1067,10 +1067,8 @@ def test_native_bailian_search_never_exposes_or_executes_external_search():
     agent = AgentLoop(config)
 
     allowed = {tool["function"]["name"] for tool in agent._allowed_tools()}
-    assert "search_web" not in allowed
-    assert "已阻止外部网页搜索调用" in (
-        agent._external_web_search_block_reason("search_web") or ""
-    )
+    assert "search_web" in allowed
+    assert agent._external_web_search_block_reason("search_web") is None
     assert agent._external_web_search_block_reason("search_literature") is None
 
 

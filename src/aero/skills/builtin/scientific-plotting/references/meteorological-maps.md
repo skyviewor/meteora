@@ -103,16 +103,20 @@ Rules:
 
 ### Wind barb increments (Chinese convention)
 
-Chinese domestic meteorological charting follows m/s-based wind barb encoding:
+Read `wind-barbs.md` before every Matplotlib wind-barb plot. Matplotlib treats
+the supplied components and `barb_increments` as unitless numbers; it does not
+convert units automatically.
 
 | Symbol | Speed (m/s) |
 |--------|-------------|
 | Short barb | 2 |
 | Long barb | 4 |
-| Hollow flag | 20 |
-| Solid flag | 50 |
+| Triangle flag | 20 |
 
-Matplotlib's `barbs` default increments (`half=5, full=10, flag=50`) correspond to the knot convention. When wind speed data is in m/s and the user expects Chinese domestic charting style, **always** set:
+Matplotlib's defaults (`half=5, full=10, flag=50`) reproduce the common knot
+convention only when `U` and `V` are supplied in knots. When wind components
+are in `m/s` and the user expects Chinese domestic public-meteorological
+charting, **always** set:
 
 ```python
 ax.barbs(lons, lats, u, v, barb_increments={"half": 2, "full": 4, "flag": 20})
@@ -120,8 +124,10 @@ ax.barbs(lons, lats, u, v, barb_increments={"half": 2, "full": 4, "flag": 20})
 
 Limitations:
 
-- Matplotlib native `barbs` cannot draw both hollow flags (20 m/s) and solid flags (50 m/s) in a single call. If the user needs this distinction, explain that custom drawing logic is required beyond what barbs provides out of the box.
-- When only one flag type is acceptable, setting `flag=20` matches the most common Chinese operational convention.
+- Matplotlib native `barbs` has only one flag increment/style per collection.
+  Do not claim it automatically distinguishes hollow `20 m/s` and solid
+  `50 m/s` flags. A product requiring two flag classes needs custom,
+  specification-tested glyph drawing.
 
 ## Precipitation maps
 

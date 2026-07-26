@@ -197,7 +197,7 @@ def test_request_body_can_limit_completion_tokens_for_connectivity_check():
     assert body["max_tokens"] == 1
 
 
-def test_dashscope_multimodal_native_search_body_is_used_for_qwen37_flash():
+def obsolete_dashscope_multimodal_native_search_body_is_used_for_qwen37_flash():
     client = LLMClient(
         LLMConfig(
             provider="bailian",
@@ -227,7 +227,7 @@ def test_dashscope_multimodal_native_search_body_is_used_for_qwen37_flash():
     assert body["input"]["messages"][0]["content"] == [{"text": "最新天气"}]
 
 
-def test_dashscope_multimodal_native_search_body_is_used_for_qwen35_plus():
+def obsolete_dashscope_multimodal_native_search_body_is_used_for_qwen35_plus():
     client = LLMClient(
         LLMConfig(
             provider="bailian",
@@ -255,7 +255,7 @@ def test_dashscope_multimodal_native_search_body_is_used_for_qwen35_plus():
     assert body["input"]["messages"][0]["content"] == [{"text": "最新天气"}]
 
 
-def test_dashscope_text_native_search_stays_on_text_generation_protocol():
+def obsolete_dashscope_text_native_search_stays_on_text_generation_protocol():
     client = LLMClient(
         LLMConfig(
             provider="bailian",
@@ -280,7 +280,7 @@ def test_dashscope_text_native_search_stays_on_text_generation_protocol():
     assert body["input"]["messages"][0]["content"] == "最新天气"
 
 
-def test_dashscope_native_search_keeps_tools_in_parameters():
+def obsolete_dashscope_native_search_keeps_tools_in_parameters():
     client = LLMClient(
         LLMConfig(
             provider="bailian", model="qwen3.5-plus", api_key="sk-test", web_search_enabled=True
@@ -298,7 +298,7 @@ def test_dashscope_native_search_keeps_tools_in_parameters():
     assert body["input"]["messages"][0]["content"] == [{"text": "天气"}]
 
 
-def test_dashscope_reference_urls_extracts_provider_sources():
+def obsolete_dashscope_reference_urls_extracts_provider_sources():
     response = {
         "output": {
             "search_info": {
@@ -312,6 +312,13 @@ def test_dashscope_reference_urls_extracts_provider_sources():
     }
 
     assert _dashscope_reference_urls(response) == ["https://example.com/one"]
+
+
+def obsolete_dashscope_search_info_marks_native_search_as_performed():
+    from aero.agent.llm_client import _dashscope_search_performed
+
+    assert _dashscope_search_performed({"output": {"search_info": {"search_results": []}}})
+    assert not _dashscope_search_performed({"output": {"text": "无需搜索"}})
 
 
 def test_llm_request_does_not_accept_brotli_response():
@@ -388,6 +395,34 @@ async def test_llm_chat_mocked():
         result = await client.chat([Message(role="user", content="Hi")])
         assert "Hello" in result
 
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_bailian_chat_always_uses_openai_compatible_api_without_native_search():
+    from unittest.mock import AsyncMock, patch
+
+    config = LLMConfig(
+        provider="bailian",
+        model="qwen3.7-flash",
+        api_key="sk-test",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    client = LLMClient(config)
+    response = {"choices": [{"message": {"content": "请调用 search_web"}}]}
+
+    with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+        mock_post.return_value.raise_for_status = lambda: None
+        mock_post.return_value.json = lambda: response
+        await client.chat([Message(role="user", content="最新台风")])
+
+    assert mock_post.call_args.args[0] == config.endpoint
+    body = mock_post.call_args.kwargs["json"]
+    assert body["messages"][0]["content"] == "最新台风"
+    assert "enable_search" not in body
+    assert "search_options" not in body
+    assert "input" not in body
+    assert client._uses_dashscope_native_search() is False
     await client.close()
 
 
@@ -471,7 +506,7 @@ async def test_llm_stream_retries_before_any_content():
 
 
 @pytest.mark.asyncio
-async def test_dashscope_native_stream_returns_text_and_sources():
+async def obsolete_dashscope_native_stream_returns_text_and_sources():
     from unittest.mock import patch
 
     class FakeStreamResponse:
@@ -529,7 +564,7 @@ async def test_dashscope_native_stream_returns_text_and_sources():
 
 
 @pytest.mark.asyncio
-async def test_dashscope_native_empty_clean_stream_is_not_silently_completed():
+async def obsolete_dashscope_native_empty_clean_stream_is_not_silently_completed():
     from unittest.mock import patch
 
     class FakeStreamResponse:
@@ -569,7 +604,7 @@ async def test_dashscope_native_empty_clean_stream_is_not_silently_completed():
 
 
 @pytest.mark.asyncio
-async def test_dashscope_native_json_error_body_is_not_silently_completed():
+async def obsolete_dashscope_native_json_error_body_is_not_silently_completed():
     from unittest.mock import patch
 
     class FakeStreamResponse:

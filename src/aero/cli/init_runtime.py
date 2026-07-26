@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.error
@@ -20,6 +21,7 @@ from aero.core.runtime_paths import (
     runtime_env_path,
     runtime_python_path,
     runtime_root,
+    save_runtime_root,
 )
 
 ENV_NAME = "aero-agent"
@@ -27,21 +29,64 @@ CONDA_ENVIRONMENT_FILE = Path(__file__).with_name("environment.yaml")
 PIP_REQUIREMENTS_FILE = Path(__file__).with_name("env-requirements.txt")
 
 
-def setup_runtime(*, full: bool = False, assume_yes: bool = False) -> bool:
+def setup_runtime(
+    *,
+    full: bool = False,
+    assume_yes: bool = False,
+    china_mirror: bool = False,
+) -> bool:
     """Prepare Aero's private Python 3.12 runtime, optionally with the full toolset."""
-    region = detect_network_region()
-    source = "大陆镜像" if region == "mainland_china" else "默认软件源"
-    print(f"正在准备 Aero 私有运行时（{source}）: {runtime_root()}")
+    previous_region = os.environ.get("AERO_NETWORK_REGION")
+    if china_mirror:
+        os.environ["AERO_NETWORK_REGION"] = "mainland_china"
+    try:
+        if not _select_runtime_root(assume_yes=assume_yes):
+            print("已取消运行时安装。")
+            return False
+        region = detect_network_region()
+        source = "大陆镜像" if region == "mainland_china" else "默认软件源"
+        print(f"正在准备 Aero 私有运行时（{source}）: {runtime_root()}")
 
-    micromamba = ensure_micromamba()
-    if micromamba is None or not ensure_aero_agent(micromamba):
+        micromamba = ensure_micromamba()
+        if micromamba is None or not ensure_aero_agent(micromamba):
+            return False
+
+        if full:
+            return install_common_packages(micromamba)
+
+        print("基础运行时已就绪；科学计算工具将在使用时按需安装。")
+        print("如需一次性预装完整工具集，请运行: aero setup --full")
+        return True
+    finally:
+        if china_mirror:
+            if previous_region is None:
+                os.environ.pop("AERO_NETWORK_REGION", None)
+            else:
+                os.environ["AERO_NETWORK_REGION"] = previous_region
+
+
+def _select_runtime_root(*, assume_yes: bool) -> bool:
+    """Offer an interactive, persistent runtime location selection."""
+    current = runtime_root().expanduser().resolve()
+    if assume_yes or not sys.stdin.isatty():
+        return True
+
+    print("Aero 运行时目录将由 Aero 专用；`aero runtime clean` 会删除整个目录。")
+    entered = input(f"运行时安装路径 [{current}]（直接回车使用此路径）: ").strip()
+    if entered:
+        selected = Path(os.path.expandvars(entered)).expanduser().resolve()
+    else:
+        selected = current
+    if selected.exists() and not selected.is_dir():
+        print(f"所选路径不是目录: {selected}")
+        return False
+    if not _confirm(f"将在 {selected} 安装 Aero 私有运行时，继续？[Y/n] ", default=True):
         return False
 
-    if full:
-        return install_common_packages(micromamba)
-
-    print("基础运行时已就绪；科学计算工具将在使用时按需安装。")
-    print("如需一次性预装完整工具集，请运行: aero setup --full")
+    save_runtime_root(selected)
+    # Make the selection effective immediately even if a parent process supplied
+    # an older AERO_RUNTIME_ROOT value.
+    os.environ["AERO_RUNTIME_ROOT"] = str(selected)
     return True
 
 
@@ -266,12 +311,11 @@ def _confirm(prompt: str, *, default: bool) -> bool:
 
 
 def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+    """Run an installer attached to the terminal so progress is visible live."""
     env = apply_package_mirrors(dict(os.environ))
     env["MAMBA_ROOT_PREFIX"] = str(runtime_root())
     return subprocess.run(
         command,
-        capture_output=True,
-        text=True,
         timeout=timeout,
         check=False,
         env=env,
@@ -279,5 +323,8 @@ def _run(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str
 
 
 def _print_command_error(message: str, result: subprocess.CompletedProcess[str]) -> None:
-    detail = result.stderr.strip() or result.stdout.strip()
-    print(f"{message}: {detail[-2000:]}")
+    stderr = result.stderr if isinstance(result.stderr, str) else ""
+    stdout = result.stdout if isinstance(result.stdout, str) else ""
+    detail = stderr.strip() or stdout.strip()
+    suffix = f": {detail[-2000:]}" if detail else f"（退出码 {result.returncode}）"
+    print(f"{message}{suffix}")

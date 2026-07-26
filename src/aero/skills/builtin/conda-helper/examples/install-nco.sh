@@ -1,30 +1,9 @@
 #!/bin/bash
-# Install NCO into the aero-agent sandbox on demand
-# Usage: bash install-nco.sh
-set -e
+# The agent should normally call ensure_runtime_tools({"tools": ["ncks"]}).
+# This standalone example initializes Aero's managed runtime, never user Conda.
+set -euo pipefail
 
-echo "=== Checking aero-agent environment ==="
-if conda info --envs 2>/dev/null | grep -q aero-agent; then
-    echo "aero-agent exists, appending NCO..."
-    conda install -n aero-agent -c conda-forge nco -y
-else
-    echo "Creating aero-agent and installing NCO..."
-    conda create -n aero-agent -c conda-forge python=3.12 nco -y
-fi
+aero setup
 
-echo ""
-echo "=== Symlinking NCO tools to PATH ==="
-CONDA_PREFIX="${CONDA_PREFIX:-$HOME/miniconda3}"
-for tool in ncks ncrcat ncap2 ncatted ncra ncea ncpdq ncwa ncdiff; do
-    src="$CONDA_PREFIX/envs/aero-agent/bin/$tool"
-    dest="$CONDA_PREFIX/bin/$tool"
-    if [ -f "$src" ]; then
-        ln -sf "$src" "$dest"
-        echo "  $tool -> $dest"
-    fi
-done
-
-echo ""
-echo "=== Verify ==="
-ncks --version 2>&1 | head -1
-echo "NCO installation complete"
+echo "Runtime initialized. In an agent task, call ensure_runtime_tools for ncks."
+~/.aero/runtime/envs/aero-agent/bin/python --version

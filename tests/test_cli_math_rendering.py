@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 from textual import events
@@ -27,7 +29,9 @@ from aero.cli.main import (
     _help_text,
     _has_persistable_session_messages,
     _assistant_claims_background_handoff,
+    _billing_markdown,
     _is_subagent_tool_status,
+    _is_billing_query,
     _normalize_checkpoint_title,
     _normalize_generated_session_title,
     _normalize_confirm_choice,
@@ -122,6 +126,29 @@ def test_render_terminal_math_repairs_plain_sqrtint():
     rendered = _render_terminal_math(text)
 
     assert rendered == "Hₛ = 4 √∫ S(f,θ) df dθ"
+
+
+def test_chat_markdown_renders_cjk_adjacent_strong_emphasis():
+    source = "一天中**午后（14:00）**气温最高，**凌晨（02:00）**最低。"
+
+    rendered = _render_terminal_math(source)
+    [paragraph] = ChatMarkdown()._build_from_source(rendered)
+
+    assert "**" not in paragraph._content.plain
+    assert [span.style for span in paragraph._content.spans] == [".strong", ".strong"]
+    assert paragraph._content.plain == (
+        "一天中 午后（14:00） 气温最高， 凌晨（02:00） 最低。"
+    )
+
+
+def test_cjk_emphasis_normalization_leaves_inline_and_fenced_code_unchanged():
+    source = "正文中**重点**继续，`代码中**原样**保留`\n```\n中文**原样**\n```\n"
+
+    rendered = _render_terminal_math(source)
+
+    assert "正文中 **重点** 继续" in rendered
+    assert "`代码中**原样**保留`" in rendered
+    assert "```\n中文**原样**\n```" in rendered
 
 
 def test_render_status_lines_places_activity_before_last_line():
@@ -540,6 +567,129 @@ def test_token_tracker_from_dict_roundtrip_preserves_per_model_usage():
     assert restored.completion_tokens == 130
     assert restored.cached_tokens == 30
     assert restored.total_cost() == original.total_cost()
+
+
+def test_token_tracker_includes_and_persists_per_call_services():
+    tracker = TokenTracker()
+    tracker.add_service("web_search:bailian", calls=2, unit_price=0.029)
+    tracker.add_service("web_search:zhipu", unit_price=0.01)
+
+    restored = TokenTracker.from_dict(tracker.to_dict())
+
+    assert restored.service_cost == 0.068
+    assert restored.total_cost() == 0.068
+    assert restored.copy().to_dict()["service_usage"] == tracker.to_dict()["service_usage"]
+
+
+def test_service_cost_keeps_historical_price_when_rate_changes():
+    tracker = TokenTracker()
+    tracker.add_service("search", unit_price=0.01)
+    tracker.add_service("search", unit_price=0.02)
+
+    assert tracker.service_cost == 0.03
+
+
+def test_billing_markdown_lists_models_services_amounts_and_shares(monkeypatch):
+    monkeypatch.setitem(
+        pricing.PRICING,
+        "test-bill-model",
+        ModelPrice(
+            input_price=1,
+            cached_input_price=0.5,
+            output_price=2,
+            context_window=10_000,
+        ),
+    )
+    tracker = TokenTracker()
+    tracker.add_llm(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 500,
+            "prompt_tokens_details": {"cached_tokens": 200},
+        },
+        "test-bill-model",
+    )
+    tracker.add_service("web_search:zhipu", calls=10, unit_price=0.01)
+
+    bill = _billing_markdown(tracker, "zh")
+
+    assert "## 会话账单" in bill
+    assert "test-bill-model" in bill
+    assert "智谱 search_std" in bill
+    assert "¥1.90" in bill
+    assert "¥0.100" in bill
+    assert "95.0%" in bill
+    assert "5.0%" in bill
+    assert "**总计：¥2.00**" in bill
+
+
+def test_billing_natural_language_intent_is_explicit_and_local():
+    assert _is_billing_query("查看本会话账单")
+    assert _is_billing_query("各模型花费占比是多少？")
+    assert _is_billing_query("钱都花在哪里了")
+    assert _is_billing_query("Show session bill")
+    assert not _is_billing_query("如何降低模型推理成本？")
+    assert not _is_billing_query("帮我分析这份财务账单中的异常交易")
+
+
+def test_deepseek_official_peak_pricing_is_applied_at_call_time():
+    tracker = TokenTracker()
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1000}
+    beijing = ZoneInfo("Asia/Shanghai")
+
+    tracker.add_llm(
+        usage,
+        "deepseek-v4-flash",
+        provider="deepseek",
+        occurred_at=datetime(2026, 7, 26, 8, 59, tzinfo=beijing),
+    )
+    tracker.add_llm(
+        usage,
+        "deepseek-v4-flash",
+        provider="deepseek",
+        occurred_at=datetime(2026, 7, 26, 9, 0, tzinfo=beijing),
+    )
+
+    assert tracker.total_cost() == pytest.approx(0.009)
+
+
+def test_bailian_deepseek_uses_bailian_list_price_without_peak_multiplier():
+    tracker = TokenTracker()
+    usage = {"prompt_tokens": 1000, "completion_tokens": 1000}
+    peak = datetime(2026, 7, 26, 14, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    tracker.add_llm(
+        usage,
+        "deepseek-v4-pro",
+        provider="bailian",
+        occurred_at=peak,
+    )
+
+    assert tracker.total_cost() == pytest.approx(0.036)
+
+
+def test_deepseek_official_cache_hit_field_uses_cache_price():
+    tracker = TokenTracker()
+    tracker.add_llm(
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 0,
+            "prompt_cache_hit_tokens": 800,
+        },
+        "deepseek-v4-flash",
+        provider="deepseek",
+        occurred_at=datetime(
+            2026,
+            7,
+            26,
+            8,
+            0,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+    )
+
+    assert tracker.cached_tokens == 800
+    assert tracker.total_cost() == pytest.approx(0.000216)
 
 
 def test_exit_session_save_is_idempotent():

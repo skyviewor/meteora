@@ -27,7 +27,9 @@ logger = structlog.get_logger()
         "  reanalysis-era5-single-levels           地表逐小时\n"
         "  reanalysis-era5-pressure-levels-monthly-means  高空月均值\n"
         "  reanalysis-era5-single-levels-monthly-means   地表月均值\n\n"
-        "不传 dataset_id 则根据 pressure_level 自动选择默认逐小时数据集。"
+        "同一天、同区域、同一变量组的多个气压层必须优先通过 pressure_levels 合并为一次请求，"
+        "不要逐层提交。地表变量属于不同数据集，需要单独请求。"
+        "不传 dataset_id 则根据 pressure_levels/pressure_level 自动选择默认逐小时数据集。"
         "月均值数据集不需要传 day。"
     ),
     parameters={
@@ -61,7 +63,17 @@ logger = structlog.get_logger()
             },
             "pressure_level": {
                 "type": "integer",
-                "description": "气压层 hPa，如 500。不填则下载地表变量",
+                "description": "兼容旧调用的单个气压层 hPa，如 500；多层必须改用 pressure_levels",
+            },
+            "pressure_levels": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "minItems": 1,
+                "uniqueItems": True,
+                "description": (
+                    "多个气压层 hPa，如 [1000, 925, 850, 700, 600, 500, 400]。"
+                    "同一请求需要多层时必须一次传入此列表，不要逐层调用"
+                ),
             },
             "area": {
                 "type": "array",
@@ -95,6 +107,7 @@ async def download_era5(
     day: int | None = None,
     dataset_id: str | None = None,
     pressure_level: int | None = None,
+    pressure_levels: list[int] | None = None,
     area: list[float] | None = None,
     data_format: str = "netcdf",
     time: list[str] | None = None,
@@ -125,12 +138,20 @@ async def download_era5(
             "status": "error",
             "message": f"日期无效：{year}-{month:02d}-{day:02d}",
         }
+    try:
+        requested_pressure_levels = _normalize_pressure_levels(
+            pressure_level=pressure_level,
+            pressure_levels=pressure_levels,
+        )
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
+    pressure_level_value = requested_pressure_levels or None
 
     project_dir = find_project_dir()
     store = CDSDownloadStore(project_dir / "aero_downloads.db")
 
     if dataset_id is None:
-        if pressure_level:
+        if requested_pressure_levels:
             dataset_id = "reanalysis-era5-pressure-levels"
         else:
             dataset_id = "reanalysis-era5-single-levels"
@@ -143,7 +164,7 @@ async def download_era5(
         year=year,
         month=month,
         day=day,
-        pressure_level=pressure_level,
+        pressure_level=pressure_level_value,
         area=area,
         data_format=data_format,
         time=time,
@@ -190,7 +211,7 @@ async def download_era5(
                 year=year,
                 month=month,
                 day=day,
-                pressure_level=pressure_level,
+                pressure_level=pressure_level_value,
                 area=area,
                 data_format=data_format,
                 file_path=str(dest_path),
@@ -216,7 +237,7 @@ async def download_era5(
                 year=year,
                 month=month,
                 day=day,
-                pressure_level=pressure_level,
+                pressure_level=pressure_level_value,
                 area=area,
                 data_format=data_format,
                 file_path=str(dest_path),
@@ -247,7 +268,7 @@ async def download_era5(
                 year=year,
                 month=month,
                 day=day,
-                pressure_level=pressure_level,
+                pressure_level=pressure_level_value,
                 area=area,
                 data_format=data_format,
                 request_overrides=overrides,
@@ -280,7 +301,7 @@ async def download_era5(
                     year=year,
                     month=month,
                     day=day,
-                    pressure_level=pressure_level,
+                    pressure_level=pressure_level_value,
                     area=area,
                     data_format=data_format,
                     file_path=str(project_dir / config.output.data_dir),
@@ -390,6 +411,7 @@ async def download_era5(
         "request_id": meta["request_id"],
         "file_path": short_path(dest_path),
         "variables": variables,
+        "pressure_levels": requested_pressure_levels,
         "data_source": "cds",
         "time_range": {"year": year, "month": f"{month:02d}", "day": day},
         "region": {"north": area[0], "west": area[1], "south": area[2], "east": area[3]}
@@ -527,6 +549,29 @@ def _era5_time_request_overrides(
     return request
 
 
+def _normalize_pressure_levels(
+    *,
+    pressure_level: int | None,
+    pressure_levels: list[int] | None,
+) -> list[int]:
+    if pressure_level is not None and pressure_levels:
+        raise ValueError("pressure_level 和 pressure_levels 不能同时传；多层请只用 pressure_levels。")
+    raw_levels = pressure_levels if pressure_levels else (
+        [pressure_level] if pressure_level is not None else []
+    )
+    normalized: list[int] = []
+    for raw in raw_levels:
+        try:
+            level = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"气压层必须是整数 hPa：{raw}") from exc
+        if not 1 <= level <= 1000:
+            raise ValueError(f"气压层超出 ERA5 标准范围 1-1000 hPa：{level}")
+        if level not in normalized:
+            normalized.append(level)
+    return normalized
+
+
 def _is_non_retryable_cds_submit_error(error: BaseException) -> bool:
     """Return whether retrying a CDS submit cannot change the outcome."""
     text = str(error).lower()
@@ -548,7 +593,7 @@ def _reuse_existing_era5_file(
     year: int,
     month: int,
     day: int | None,
-    pressure_level: int | None,
+    pressure_level: int | list[int] | None,
     area: list[float] | None,
     data_format: str,
     time: list[str] | None,

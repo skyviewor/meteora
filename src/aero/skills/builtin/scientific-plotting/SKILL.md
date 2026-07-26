@@ -12,6 +12,15 @@ Use this skill to produce or review meteorological research figures. The goal is
 1. Identify the figure type and the scientific message.
    - Map, time series, vertical cross-section, station interpolation, radar/satellite image, verification plot, multi-panel comparison, or animation.
    - Decide the primary variable first. Use filled shading for the primary scalar field when appropriate; use contours, vectors, station markers, masks, or annotations only as supporting layers.
+   - For any pressure-coordinate vertical cross-section, read
+     `references/vertical-cross-sections.md` before planning data requirements or
+     writing plotting code. Its axis, terrain, vector-component, and validation
+     rules are mandatory.
+   - When the section contains arrows, quivers, barbs, streamlines, vertical
+     velocity, or circulation, also read
+     `references/cross-section-wind-vectors.md`. Decide whether the vectors show
+     horizontal wind, schematic in-plane circulation, or physical trajectories
+     before selecting components or scaling.
 
 2. Check the minimum metadata before drawing.
    - Inspect data metadata: variable name, dimensions, coordinates, units, valid time, level, region, and missing values.
@@ -26,6 +35,9 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Categorical fields: land cover, weather type, clusters, precipitation phase.
    - Cyclic fields: wind direction, phase, seasonal angle.
    Read `references/colormaps-and-units.md` when choosing colormaps or units.
+   - For any Matplotlib wind-barb plot, read `references/wind-barbs.md` before
+     calling `barbs`. Confirm the component units and choose either domestic
+     Chinese `m s-1` increments or knot-style increments explicitly.
 
 4. If the figure is a map, choose boundaries and projection deliberately.
    - For China-region maps, prefer `cnmaps` for China borders, provincial/city boundaries, clipping, masking, and whitening. Do not use `cartopy.feature.BORDERS` or `cartopy.feature.COASTLINE` for China's national boundary.
@@ -352,6 +364,10 @@ Read only the files needed for the task:
 - `references/china-borders.md`: China boundaries, cnmaps, South China Sea/inset considerations, clipping/masking rules.
 - `references/colormaps-and-units.md`: Matplotlib colormaps, cmaps/NCL colormaps, variable-specific color logic, units, colorbar conventions.
 - `references/meteorological-maps.md`: Map projections, map layers, contours, wind vectors, precipitation/radar/satellite/cross-section rules.
+- `references/vertical-cross-sections.md`: **Required for every atmospheric vertical cross-section.** Pressure-axis orientation, terrain conversion and masking, along-section/vertical wind components, interpolation, and image-level acceptance checks.
+- `references/cross-section-wind-vectors.md`: **Required when a vertical cross-section contains wind arrows, quivers, barbs, streamlines, or vertical velocity.** Along-section projection, ERA5 omega versus height velocity, vertical exaggeration, normalization, thinning, robust scaling, and truthful vector-key labels.
+- `references/wind-barbs.md`: **Required for every Matplotlib wind-barb plot.** Unit-aware `barb_increments`, Chinese public-meteorological `2/4/20 m s-1` encoding, international `5/10/50 kt` encoding, rounding, flag limitations, and synthetic-speed validation.
+- `examples/era5-meridional-pressure-cross-section.py`: **Priority read and starting point** for an ERA5 north-south pressure cross-section with surface-geopotential terrain, underground masking, wind-speed shading, and explicitly labeled horizontal `(u, v)` barbs. Adapt its paths, longitude, time, variables, and labels; retain its coordinate-based selection, order-independent terrain interpolation, axis assertion, and acceptance diagnostics.
 - `Safe compact export for Cartopy maps` above: Default pattern for a one-panel Cartopy map with a colorbar. Use it before introducing manual axes positions or any tight-bbox export.
 - `Regional PlateCarree map ticks and gridlines` above: Default label/grid pattern for a rectangular local PlateCarree map; use it to avoid clipped Gridliner labels.
 - `references/publication-quality.md`: Multi-panel layout, journal/export quality, typography, CJK font handling with mplfonts, labels, colorbar placement, accessibility.
@@ -372,10 +388,24 @@ These rules must be followed without exception. They override convenience, aesth
 - **Finite contour levels**: When using `contourf` with an explicitly finite `levels` range, pass `extend="both"` by default so valid values below/above the selected display range use the end colors rather than becoming blank. The colorbar must show the corresponding end triangles. Do not use `extend` to conceal NaN/masked data: investigate and represent genuine missing data separately.
 - **Default file-size cap**: Unless the user explicitly requests high-definition, print, publication, large-format, or a specific high pixel/DPI output, do not deliver a raster figure above 500 KB. Verify the saved file size rather than estimating it from `figsize` or DPI.
 - **Figure-integrity check**: A colorbar, legend, title, or blank canvas alone is never a valid scientific figure. Before delivering an export, confirm that the primary data axes were saved and occupy a meaningful part of the image. Never trade away the data panel to satisfy the default file-size cap.
+- **Vertical cross-section check**: For pressure coordinates, high pressure must
+  appear at the bottom and low pressure at the top. Underground cells must be
+  masked and the same terrain region must be visibly filled. Never plot `(u, v)`
+  as if it were an in-plane latitude/longitude-versus-pressure circulation
+  vector; use along-section wind plus vertical velocity, or label horizontal
+  wind barbs explicitly.
+- **Cross-section vector disclosure**: Never present a vertically exaggerated,
+  normalized, clipped, or screen-coordinate quiver as a true airflow angle or
+  true two-dimensional speed. State the vertical variable, units, multiplier,
+  normalization/clipping, and the meaning of the reference arrow on the figure.
 - **Multi-panel title clearance**: If a multi-panel Figure has both a `suptitle` and per-panel titles, call `ensure_suptitle_clearance(fig, axes)` after setting the titles and before export. Never reduce its title/colorbar reservations to zero or deliver overlapping text.
 - Never use a diverging colormap for a strictly positive scalar field unless it encodes a meaningful threshold.
 - Never use a sequential colormap for an anomaly/bias field that needs positive/negative symmetry.
 - Never use dense wind arrows or dense significance dots that cover the actual meteorological field.
+- **Wind-barb units**: Never pass `m s-1` components to Matplotlib's default
+  `barbs` and describe the result as Chinese domestic wind-barb notation.
+  Matplotlib does not infer or convert units. Set the required increments
+  explicitly, or convert both vector components to knots and label them.
 - Never present interpolated station fields, reanalysis fields, smoothed fields, or AI-generated/infilled radar frames as raw observations. All processing methods must be disclosed.
 - **China boundaries (HIGHEST PRIORITY)**: Whenever a map involves China's territory (Mainland, Taiwan, Hong Kong, Macau, South China Sea islands, etc.), you MUST use `cnmaps` for boundary data. Using `cartopy.feature.BORDERS`, `cartopy.feature.COASTLINE`, or any NaturalEarth-based global boundary for China's border is FORBIDDEN. Before writing any plotting code for a China-involved map, you MUST first read `skills/builtin/cnmaps/references/api-cheatsheet.md` and `skills/builtin/cnmaps/references/plotting-patterns.md`. This rule applies even if the user does not explicitly mention `cnmaps` or China boundaries.
 - **Global fill map seam**: Whenever plotting a global `contourf` or `pcolormesh` map where longitude spans 0°–360° (or -180°–180°) with `ax.set_global()`, you MUST call `cartopy.util.add_cyclic_point` to close the longitude seam. A white-line gap at the 0°/360° meridian is unacceptable for publication-quality output. See `references/meteorological-maps.md` for the exact usage pattern.

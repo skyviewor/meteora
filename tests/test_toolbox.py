@@ -284,6 +284,56 @@ async def test_ensure_runtime_tools_creates_private_environment_when_missing(
 
 
 @pytest.mark.asyncio
+async def test_ensure_runtime_tools_bootstraps_managed_micromamba_when_missing(
+    monkeypatch, tmp_path
+):
+    from aero.agent.runtime import Runtime
+    from aero.cli import init_runtime
+    from aero.toolbox import builtin_tools
+    from aero.toolbox.runtime_manager import get_runtime_tool_manager
+
+    root = tmp_path / "runtime"
+    env_bin = root / "envs" / "aero-agent" / "bin"
+    managed_micromamba = root / "bin" / "micromamba"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
+    monkeypatch.setattr(
+        Runtime, "_build_exec_env", staticmethod(lambda: {"PATH": str(env_bin)})
+    )
+
+    manager = get_runtime_tool_manager()
+    monkeypatch.setattr(manager, "find_conda_executable", lambda env: None)
+    monkeypatch.setattr(manager, "conda_env_exists", lambda conda_path, env: False)
+
+    def fake_bootstrap():
+        managed_micromamba.parent.mkdir(parents=True)
+        managed_micromamba.write_text("#!/bin/sh\n")
+        return managed_micromamba
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[1] == "create":
+            env_bin.mkdir(parents=True, exist_ok=True)
+        else:
+            tool = env_bin / "cdo"
+            tool.write_text("#!/bin/sh\n")
+            tool.chmod(0o755)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(init_runtime, "ensure_micromamba", fake_bootstrap)
+    monkeypatch.setattr(manager, "command_runner", fake_run)
+
+    result = await builtin_tools.ensure_runtime_tools(["cdo"])
+
+    assert result["status"] == "success"
+    assert calls[0][0] == str(managed_micromamba)
+    assert ["--root-prefix", str(root)] == calls[0][3:5]
+    assert ["--prefix", str(env_bin.parent)] == calls[0][5:7]
+    assert result["package_manager"] == str(managed_micromamba)
+
+
+@pytest.mark.asyncio
 async def test_ensure_runtime_tools_reports_private_package_install_failure(
     monkeypatch, tmp_path
 ):
@@ -602,6 +652,72 @@ async def test_run_shell_truncates_install_output_more_aggressively(
     assert result["output_truncated"] is True
     assert result["stdout_bytes"] == 9000
     assert len(result["stdout"]) < 8500
+
+
+@pytest.mark.asyncio
+async def test_run_shell_blocks_cnmaps_in_mamba_install(monkeypatch, tmp_path):
+    from aero.agent.runtime import Runtime
+    from aero.toolbox import builtin_tools
+
+    root = tmp_path / "runtime"
+    env_bin = root / "envs" / "aero-agent" / "bin"
+    env_bin.mkdir(parents=True)
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
+
+    async def should_not_execute(*args, **kwargs):
+        raise AssertionError("blocked cnmaps conda command must not execute")
+
+    monkeypatch.setattr(Runtime, "run_subprocess_streaming", should_not_execute)
+
+    result = await builtin_tools.run_shell(
+        (
+            f"{env_bin}/mamba install -p {env_bin.parent} -c conda-forge "
+            "xarray cartopy cnmaps matplotlib -y"
+        ),
+        "install plotting dependencies",
+    )
+
+    assert result["status"] == "error"
+    assert result["cnmaps_conda_install_blocked"] is True
+    assert result["suggested_command"] == (
+        f"{env_bin}/python -m pip install -U cnmaps"
+    )
+    assert "从 conda/mamba 包列表中移除 cnmaps" in result["message"]
+
+
+def test_cnmaps_conda_guard_allows_pip_and_unrelated_conda_installs():
+    from aero.toolbox.tools.runtime import _cnmaps_conda_install_error
+
+    assert _cnmaps_conda_install_error("python -m pip install -U cnmaps") is None
+    assert _cnmaps_conda_install_error("mamba install cartopy matplotlib -y") is None
+    assert _cnmaps_conda_install_error("conda install cnmaps-data -y") is not None
+    assert _cnmaps_conda_install_error("micromamba create -n plot cnmaps") is not None
+
+
+def test_shell_guard_blocks_user_conda_and_allows_scoped_managed_micromamba(
+    monkeypatch, tmp_path
+):
+    from aero.toolbox.tools.runtime import _user_conda_runtime_error
+
+    root = tmp_path / "runtime"
+    env = root / "envs" / "aero-agent"
+    managed = root / "bin" / "micromamba"
+    monkeypatch.setenv("AERO_RUNTIME_ROOT", str(root))
+
+    assert _user_conda_runtime_error("conda create -n aero-agent python=3.12") is not None
+    assert (
+        _user_conda_runtime_error(
+            "/Users/test/miniconda3/envs/aero-agent/bin/mamba install nco -y"
+        )
+        is not None
+    )
+    assert _user_conda_runtime_error("micromamba install nco -y") is not None
+    assert (
+        _user_conda_runtime_error(
+            f"{managed} install --root-prefix {root} --prefix {env} nco --yes"
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio

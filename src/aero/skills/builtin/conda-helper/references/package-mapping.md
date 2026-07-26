@@ -27,6 +27,16 @@ When a shell command returns `command not found`, use this table to find the con
 | ncdump | libnetcdf | conda-forge | NetCDF content dump |
 | ncgen | libnetcdf | conda-forge | NetCDF file generation |
 
+## Pip-only Python Packages
+
+| Python package | Installation |
+|----------------|--------------|
+| cnmaps | `python -m pip install -U cnmaps` |
+
+Never include `cnmaps` or `cnmaps-data` in a conda/mamba package list. Install
+`cnmaps` with the `aero-agent` environment's Python; `cnmaps-data` is pulled in
+as its pip dependency.
+
 ## Reverse Lookup
 
 If the command is not in the table:

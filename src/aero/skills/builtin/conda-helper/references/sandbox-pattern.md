@@ -1,77 +1,37 @@
-# aero-agent Sandbox Install Pattern
+# Aero Managed Runtime Pattern
 
-## Principles
+## Ownership
 
-- **On demand**: Install only when a tool is missing; never pre-install
-- **Unified sandbox**: All tools go into one `aero-agent` conda environment
-- **Never touch base**: If the user's base env has dependency conflicts, use an isolated env — do not repair base
-- **Ask before install**: Always get explicit user consent before executing
+- Aero CLI installation: `uv tool`
+- Package manager: `~/.aero/runtime/bin/micromamba`
+- Fixed environment: `~/.aero/runtime/envs/aero-agent`
+- Runtime Python: `~/.aero/runtime/envs/aero-agent/bin/python`
 
-## Step-by-Step
+No user Conda installation participates in this flow.
 
-### 1. Check if aero-agent exists
+## Tool Installation
+
+For mapped CLI tools, call:
+
+```text
+ensure_runtime_tools({"tools": ["ncks", "cdo"]})
+```
+
+The tool requests confirmation, bootstraps managed Micromamba when absent,
+recreates the fixed environment when absent, installs packages from
+conda-forge, and verifies each executable.
+
+For pip-only libraries:
 
 ```bash
-conda info --envs | grep aero-agent
+~/.aero/runtime/envs/aero-agent/bin/python -m pip install -U <package>
 ```
 
-### 2. Create or append
+Use that command for `cnmaps`. Never install it with conda or mamba.
 
-**First time (env does not exist):**
-```bash
-conda create -n aero-agent -c conda-forge python=3.12 -y
-```
+## Prohibited Fallbacks
 
-**Append (env already exists):**
-```bash
-conda install -n aero-agent -c conda-forge <package> -y
-```
-
-**Batch install (avoids redundant dependency resolution):**
-```bash
-conda install -n aero-agent -c conda-forge nco cdo eccodes -y
-```
-
-**pip-only Python packages:**
-```bash
-~/miniconda3/envs/aero-agent/bin/python -m pip install -U <package>
-```
-
-`cnmaps` must always be installed with pip:
-```bash
-~/miniconda3/envs/aero-agent/bin/python -m pip install -U cnmaps
-```
-
-Do not install `cnmaps` with `conda`, `mamba`, or include it in conda/mamba
-batch install commands.
-
-### 3. Symlink to PATH
-
-```bash
-ln -sf ~/miniconda3/envs/aero-agent/bin/<tool> ~/miniconda3/bin/<tool>
-```
-
-Symlink every installed tool. `~/miniconda3/bin/` is normally on PATH — tools are available immediately; no Aero restart needed.
-
-### 4. Verify
-
-```bash
-which <tool> && <tool> --version 2>&1 | head -1
-```
-
-### 5. Retry
-
-After successful install, retry the failed operation.
-
-## User Proposal Template
-
-```
-Detected missing <tool_name> (<purpose>). Need to install <package_name>
-into the Aero sandbox `aero-agent`. This will NOT affect your
-main environment. Proceed?
-```
-
-## Platform Notes
-
-**macOS**: Prefer conda-forge. Fallback: `brew install <pkg>`.
-**Linux**: Prefer conda-forge. Fallback: `apt-get install -y <pkg>`.
+Do not invoke user `conda`, `mamba`, or `micromamba`; do not activate base; do
+not inspect or modify user environments; and do not symlink managed binaries
+into user paths. If managed bootstrap fails, report the error and suggest
+retrying `aero setup`—never switch package managers.
