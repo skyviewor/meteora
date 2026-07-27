@@ -14,11 +14,11 @@ See `china-lambert-scs-inset-right.py` for the complete pattern
 explanation.
 """
 
+import cartopy.crs as ccrs
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import cartopy.crs as ccrs
 from cnmaps import clip_contours_by_map, draw_map, draw_maps, get_adm_maps
 from mplfonts import use_font
 
@@ -71,7 +71,10 @@ cs = ax.contourf(
 clip_contours_by_map(cs, china_mainland, ax=ax)
 draw_map(china_mainland, ax=ax, color='#333333', linewidth=0.8)
 
-ax.set_extent([75, 133, 15, 55], crs=ccrs.PlateCarree())
+# Keep the national main panel separate from the South China Sea inset.
+# Extending the main axes to 15°N duplicates the inset, shrinks mainland China,
+# and creates large apparent margins around the useful map.
+ax.set_extent([73, 136, 18, 54], crs=ccrs.PlateCarree())
 ax.set_title('Your Title Here', fontsize=14, fontweight='bold', pad=8)
 
 # ── 5. Gridlines (Lambert: force labels to border, no rotation) ──

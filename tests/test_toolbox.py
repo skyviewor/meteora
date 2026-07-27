@@ -542,7 +542,7 @@ def test_multi_panel_cartopy_plot_validation_requires_extend_and_grid_locations(
 
     assert result is not None
     assert result["scientific_plot_validation_failed"] is True
-    assert len(result["violations"]) == 3
+    assert len(result["violations"]) == 5
 
 
 def test_cartopy_plot_validation_rejects_tight_bbox(tmp_path):
@@ -565,14 +565,213 @@ def test_cartopy_plot_validation_rejects_tight_bbox(tmp_path):
     assert "bbox_inches='tight'" in result["violations"][0]
 
 
+def test_plot_validation_rejects_layout_passed_to_savefig(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig = plt.figure()\n"
+        "fig.savefig('map.png', layout='compressed')\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "不能传给 savefig" in result["violations"][0]
+
+
+def test_plot_validation_rejects_raw_string_with_doubled_mathtext_slashes(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_bad_unit.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        r'ax.set_xlabel(r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2}$)")' + "\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "双反斜杠" in result["violations"][0]
+
+
+def test_plot_validation_rejects_unbalanced_mathtext_delimiters(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_bad_unit.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        r'ax.set_xlabel(r"PVU (10^{-6}\,\mathrm{K}$)")' + "\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "未配对" in result["violations"][0]
+
+
+def test_plot_validation_accepts_correct_raw_mathtext_unit(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_good_unit.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        r'ax.set_xlabel(r"PVU ($10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$)")'
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _scientific_plot_script_error(f"python {script}", str(tmp_path)) is None
+
+
+def test_plot_validation_rejects_mathtext_commands_outside_math_mode(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_bad_unit.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        r'ax.set_xlabel(r"PVU (0^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}})")'
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert any("`$...$` 外" in item for item in result["violations"])
+    assert any("`10^{-6}` 误写成了 `0^{-6}`" in item for item in result["violations"])
+    assert any("PVU 单位格式不规范" in item for item in result["violations"])
+
+
+def test_plot_validation_rejects_noncanonical_pvu_unit(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_bad_pvu_unit.py"
+    script.write_text(
+        "import matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        r'ax.set_xlabel(r"PVU ($10^{-6}\,\mathrm{K\,m^2\,s^{-1}}$)")' + "\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert any("PVU 单位格式不规范" in item for item in result["violations"])
+
+
+def test_multi_panel_cartopy_plot_validation_rejects_mixed_layout_owners(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(1, 2, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf([[1]], extend='both')\n"
+        "    ax.gridlines(xlocs=[0], ylocs=[0], linestyle='--')\n"
+        "fig.subplots_adjust(top=0.8)\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "只能有一个布局所有者" in result["violations"][0]
+
+
+def test_multi_panel_cartopy_plot_validation_rejects_suptitle_outside_canvas(
+    tmp_path,
+):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(1, 2, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf([[1]], extend='both')\n"
+        "    ax.gridlines(xlocs=[0], ylocs=[0], linestyle='--')\n"
+        "fig.suptitle('Title', y=1.02)\n"
+        "ensure_suptitle_clearance(fig, axes)\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert "总标题不得用 y>=1" in result["violations"][0]
+
+
 def test_multi_panel_cartopy_plot_validation_accepts_complete_pattern(tmp_path):
     from aero.toolbox.tools.runtime import _scientific_plot_script_error
 
     script = tmp_path / "plot_good.py"
     script.write_text(
         "import cartopy.crs as ccrs\n"
+        "from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter\n"
         "import matplotlib.pyplot as plt\n"
         "fig, axes = plt.subplots(3, 3, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
+        "    ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())\n"
+        "    ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())\n"
+        "    ax.xaxis.set_major_formatter(LongitudeFormatter())\n"
+        "    ax.yaxis.set_major_formatter(LatitudeFormatter())\n"
+        "    ax.tick_params(labelleft=True, labelbottom=True)\n"
+        "    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, "
+        "draw_labels=False, linestyle='--')\n"
+        "assert_artists_inside_canvas(fig)\n",
+        encoding="utf-8",
+    )
+
+    assert _scientific_plot_script_error(f"python {script}", str(tmp_path)) is None
+
+
+def test_multi_panel_platecarree_rejects_missing_outer_coordinate_labels(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_no_latitude_labels.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(1, 2, layout='compressed', "
+        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
+        "for ax in axes.flat:\n"
+        "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
+        "    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, "
+        "draw_labels=True, linestyle='--')\n"
+        "assert_artists_inside_canvas(fig)\n",
+        encoding="utf-8",
+    )
+
+    result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
+
+    assert result is not None
+    assert any("外侧经纬度标签" in item for item in result["violations"])
+
+
+def test_multi_panel_cartopy_plot_validation_requires_canvas_bounds_guard(tmp_path):
+    from aero.toolbox.tools.runtime import _scientific_plot_script_error
+
+    script = tmp_path / "plot_no_bounds_guard.py"
+    script.write_text(
+        "import cartopy.crs as ccrs\n"
+        "import matplotlib.pyplot as plt\n"
+        "fig, axes = plt.subplots(1, 2, layout='compressed', "
         "subplot_kw={'projection': ccrs.PlateCarree()})\n"
         "for ax in axes.flat:\n"
         "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
@@ -580,30 +779,13 @@ def test_multi_panel_cartopy_plot_validation_accepts_complete_pattern(tmp_path):
         encoding="utf-8",
     )
 
-    assert _scientific_plot_script_error(f"python {script}", str(tmp_path)) is None
-
-
-def test_multi_panel_cartopy_plot_validation_requires_title_clearance_guard(tmp_path):
-    from aero.toolbox.tools.runtime import _scientific_plot_script_error
-
-    script = tmp_path / "plot_titles.py"
-    script.write_text(
-        "import cartopy.crs as ccrs\n"
-        "import matplotlib.pyplot as plt\n"
-        "fig, axes = plt.subplots(2, 2, layout='compressed', "
-        "subplot_kw={'projection': ccrs.PlateCarree()})\n"
-        "for ax in axes.flat:\n"
-        "    ax.contourf(lon, lat, field, levels=levels, extend='both')\n"
-        "    ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, linestyle='--')\n"
-        "    ax.set_title('panel')\n"
-        "fig.suptitle('whole figure')\n",
-        encoding="utf-8",
-    )
-
     result = _scientific_plot_script_error(f"python {script}", str(tmp_path))
 
     assert result is not None
-    assert "ensure_suptitle_clearance" in result["violations"][0]
+    assert any(
+        "assert_artists_inside_canvas(fig)" in item
+        for item in result["violations"]
+    )
 
 
 @pytest.mark.asyncio

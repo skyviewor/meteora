@@ -20,6 +20,94 @@ Always distinguish map projection from data CRS. For longitude-latitude data in 
 - Confirm whether longitude is `0..360` or `-180..180`; convert only when needed for the requested region.
 - Show the map extent that matches the user's requested region.
 
+## Display domain and clipping domain
+
+Decide the map's semantic domain before choosing its extent or applying a clip:
+
+- For a regional synoptic map (East Asia, Europe, global, etc.), plot the field
+  across the requested regional domain. Administrative boundaries are overlays;
+  do not clip the field to one country.
+- For a country/province thematic map, clip or mask the field to that
+  administrative geometry and fit the axes extent to the same geometry, with a
+  small deliberate margin.
+- Do not use a broad regional `set_extent(...)` together with
+  `clip_contours_by_map(...)` for one country merely to leave the surrounding
+  region blank. This creates misleading empty space and is not a layout problem.
+- White regions must have a clear meaning: outside the requested administrative
+  domain, missing/masked data, or an intentional no-data category. If the plotted
+  field occupies only a small part of the axes, verify the extent, mask, and clip
+  before adjusting `figsize`, subplot margins, or export cropping.
+- For a national China map with a South China Sea inset, treat duplication as a
+  domain error, not as ordinary canvas whitespace. The main axes should normally
+  stop near 18°N (`[73, 136, 18, 54]` is a useful PlateCarree default), while the
+  inset alone covers approximately `[105, 123, 2, 25]`. If the remote South China
+  Sea islands are visible in both panels, correct the two extents before doing
+  any Figure-size calibration.
+- After the domain is correct, derive the canvas aspect from the **rendered
+  GeoAxes**, not from the downloaded grid's longitude/latitude spans and not
+  from a landscape default. Fixed-aspect GeoAxes cannot stretch to fill an
+  incompatible canvas. In particular, `lon_span / lat_span` is not a reliable
+  rendered panel ratio: Cartopy projection geometry and the actual
+  `set_extent(...)` determine the axes box, while titles, tick labels, colorbars,
+  and insets determine how much of the Figure remains available.
+- Reserve title and horizontal-colorbar space vertically. Never add arbitrary
+  side width such as `panel_width + 0.8`; that constant repeatedly creates
+  symmetric left/right whitespace.
+
+For a one-panel map, start with a conservative canvas, render once, and correct
+the Figure width from the measured main-axes occupancy. This is layout
+calibration, not pixel cropping:
+
+```python
+fig, ax = plt.subplots(
+    figsize=(6.4, 5.0),
+    layout="compressed",
+    subplot_kw={"projection": ccrs.PlateCarree()},
+)
+
+# Add the map, extent, ticks, title, inset, and layout-aware colorbar first.
+# Then measure the actual GeoAxes box after Cartopy and the layout engine run.
+fig.canvas.draw()
+target_axes_width_fraction = 0.82
+actual_axes_width_fraction = ax.get_position().width
+
+if actual_axes_width_fraction < target_axes_width_fraction:
+    width, height = fig.get_size_inches()
+    corrected_width = width * (
+        actual_axes_width_fraction / target_axes_width_fraction
+    )
+    fig.set_size_inches(corrected_width, height, forward=True)
+    fig.canvas.draw()
+```
+
+Use a target around `0.78..0.84`, leaving room for y tick labels while avoiding
+large symmetric side margins. Apply at most one correction during normal
+generation; if the result remains outside that range, inspect the extent,
+layout owner, and decoration placement instead of looping blindly. Do not
+change the height in this correction because it is already reserving the
+suptitle, x tick labels, and horizontal colorbar. Run the normal canvas-bound
+checks after the correction and inspect the exported raster.
+
+For multi-panel figures, use the aspect-aware grid method in the main skill
+instead of independently resizing each axes. For non-PlateCarree projections,
+the same rendered-occupancy calibration is safer than hand-computing a
+projection ratio. Do not solve whitespace with `bbox_inches="tight"`.
+
+```python
+# East Asia PV map: retain the complete field and overlay boundaries.
+ax.contourf(lon, lat, pv, transform=ccrs.PlateCarree(), extend="both")
+draw_maps(country_boundaries, ax=ax)
+ax.set_extent([100, 150, 10, 55], crs=ccrs.PlateCarree())
+
+# China-only thematic map without a South China Sea inset: clip and fit the view
+# to the requested China geometry. With an inset, use the separate main/inset
+# extents described above instead of the full multi-polygon bounds.
+cs = ax.contourf(lon, lat, pv, transform=ccrs.PlateCarree(), extend="both")
+clip_contours_by_map(cs, china_map, ax=ax)
+west, south, east, north = china_map.get_extent()
+ax.set_extent([west, east, south, north], crs=ccrs.PlateCarree())
+```
+
 ## Global fill maps and the cyclic-point seam
 
 When plotting a **global filled-contour map** with `contourf` or `pcolormesh` where the longitude coordinate spans 0° to 360° (or -180° to 180°), a narrow **white line (gap)** appears at the 0°/360° meridian boundary. This is caused by the longitude array not wrapping — the last column at 360° does not connect back to the first column at 0°.

@@ -8,14 +8,16 @@ Use this example when the user wants:
      main map (bottom-right corner).
 
 Adapt the data loading block to your dataset, then tune levels,
-colormap, extent, and the SCS inset position as needed.
+colormap, and the SCS inset position as needed. Keep the conventional
+main-panel and inset domains separate: the main panel must not repeat
+the remote South China Sea islands shown by the inset.
 """
 
+import cartopy.crs as ccrs
+import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import cartopy.crs as ccrs
 from cartopy.mpl.ticker import LatitudeFormatter, LongitudeFormatter
 from cnmaps import clip_contours_by_map, draw_map, draw_maps, get_adm_maps
 from mplfonts import use_font
@@ -64,7 +66,11 @@ cs = ax.contourf(
 clip_contours_by_map(cs, china_mainland, ax=ax)
 draw_map(china_mainland, ax=ax, color='#333333', linewidth=0.8)
 
-ax.set_extent([72, 136, 15, 55], crs=ccrs.PlateCarree())
+# The main view includes Hainan and Taiwan but deliberately stops near 18°N.
+# Never use `china_full.get_extent()` here: its remote southern polygons would
+# duplicate the South China Sea inset and shrink the useful mainland map.
+MAIN_EXTENT = [73, 136, 18, 54]
+ax.set_extent(MAIN_EXTENT, crs=ccrs.PlateCarree())
 fig.suptitle('Your Title Here', fontsize=14, fontweight='bold')
 
 lon_ticks = np.arange(80, 136, 10)
@@ -86,7 +92,7 @@ cbar.ax.tick_params(labelsize=8, length=2, pad=2)
 
 # ── 6. South China Sea inset ──
 INSET_POS = [0.80, 0.08, 0.21, 0.28]   # [left, bottom, width, height] in ax coords
-SCS_EXTENT = [105, 123, 2, 25]
+SCS_EXTENT = [105, 123, 2, 25]  # inset only; never reuse for the main axes
 
 ax_inset = ax.inset_axes(INSET_POS, transform=ax.transAxes,
                          projection=ccrs.PlateCarree())

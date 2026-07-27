@@ -12,6 +12,16 @@ Use this reference when Chinese, Japanese, or Korean text in matplotlib figures 
 - Do not use Unicode superscripts/subscripts in scientific units (`10⁻⁶`, `m²`,
   `kg⁻¹`, `s⁻¹`): even when CJK text works, the selected font can lack these
   glyphs. Use Matplotlib mathtext instead, for example
-  `r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)"`.
+  `r"PVU ($10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$)"`.
+- Python escaping must match the string type. A raw string uses one backslash
+  for MathText commands, while an ordinary string uses two:
+  `"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)"`. Never write
+  doubled MathText backslashes inside `r"..."`, and keep the whole unit inside
+  one balanced `$...$` pair.
+- MathText syntax outside `$...$` is rendered literally. For PVU, do not
+  regenerate or patch the unit expression token by token. Define and reuse this
+  exact constant:
+  `PVU_LABEL = r"PVU ($10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$)"`.
+  `0^{-6}`, a missing `$`, or `\mathrm` outside math mode is an invalid label.
 - mplfonts project: https://github.com/Clarmy/mplfonts
 - Do not use other CJK font solutions unless the user explicitly requests them.

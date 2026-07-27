@@ -2,6 +2,7 @@
 
 # ruff: noqa: E501
 
+import ast
 import re
 import shlex
 import shutil
@@ -406,6 +407,40 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
             continue
 
         is_cartopy_contour_map = "cartopy" in source and "contourf(" in source
+        label_violations = _scientific_label_violations(source)
+        if label_violations:
+            return {
+                "status": "error",
+                "scientific_plot_validation_failed": True,
+                "message": (
+                    "科学绘图脚本的文字标签未通过执行前检查："
+                    + "；".join(label_violations)
+                    + "。请修正 MathText 后重新执行。"
+                ),
+                "script_path": str(script_path),
+                "violations": label_violations,
+            }
+        if re.search(
+            r"(?:savefig|print_(?:png|jpg|jpeg|tif|tiff))\s*\([^)]*"
+            r"\blayout\s*=",
+            source,
+            flags=re.DOTALL,
+        ):
+            violations = [
+                "layout 只能在 plt.subplots()/plt.figure() 创建画布时设置，"
+                "不能传给 savefig/print_png"
+            ]
+            return {
+                "status": "error",
+                "scientific_plot_validation_failed": True,
+                "message": (
+                    "科学绘图脚本未通过执行前检查："
+                    + "；".join(violations)
+                    + "。请先编辑脚本并重新执行。"
+                ),
+                "script_path": str(script_path),
+                "violations": violations,
+            }
         if is_cartopy_contour_map and re.search(
             r"bbox_inches\s*=\s*['\"]tight['\"]", source
         ):
@@ -439,6 +474,19 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
                 "固定比例 Cartopy 多子图必须使用 layout='compressed'，"
                 "不能用 constrained layout 假装缩小子图间距"
             )
+        elif re.search(r"(?:subplots_adjust|tight_layout)\s*\(", source):
+            violations.append(
+                "使用 layout='compressed' 后不得再调用 subplots_adjust/tight_layout；"
+                "画布只能有一个布局所有者"
+            )
+        if re.search(
+            r"\.suptitle\s*\([^)]*\by\s*=\s*(?:1(?:\.0*)?|1\.\d+|[2-9]\d*(?:\.\d+)?)",
+            source,
+            flags=re.DOTALL,
+        ):
+            violations.append(
+                "总标题不得用 y>=1 放到画布外；省略 y，让布局引擎为 suptitle 预留空间"
+            )
         if not re.search(r"\.gridlines\s*\(", source):
             violations.append("每个面板必须绘制轻量虚线经纬网")
         elif not all(
@@ -450,14 +498,32 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
             )
         ):
             violations.append("经纬网必须指定 xlocs/ylocs，并使用 linestyle='--'")
-        if (
-            re.search(r"\.suptitle\s*\(", source)
-            and re.search(r"\.set_title\s*\(", source)
-            and not re.search(r"ensure_suptitle_clearance\s*\(\s*fig\s*,", source)
-        ):
+        if "ccrs.PlateCarree" in source:
+            if re.search(r"gridlines\s*\([^)]*draw_labels\s*=\s*True", source):
+                violations.append(
+                    "矩形 PlateCarree 多子图不得依赖 Gridliner 绘制标签；"
+                    "请用普通 GeoAxes 刻度，Gridliner 只绘制虚线"
+                )
+            if not all(
+                re.search(pattern, source)
+                for pattern in (
+                    r"\.set_xticks\s*\(",
+                    r"\.set_yticks\s*\(",
+                    r"LongitudeFormatter\s*\(",
+                    r"LatitudeFormatter\s*\(",
+                    r"labelleft\s*=",
+                    r"labelbottom\s*=",
+                )
+            ):
+                violations.append(
+                    "PlateCarree 多子图必须保留外侧经纬度标签："
+                    "底行显示 LongitudeFormatter 刻度，左列显示 "
+                    "LatitudeFormatter 刻度"
+                )
+        if not re.search(r"assert_artists_inside_canvas\s*\(\s*fig\s*\)", source):
             violations.append(
-                "同时使用总标题和子图标题时，必须在导出前调用 "
-                "ensure_suptitle_clearance(fig, axes) 检查文字碰撞"
+                "多子图必须在导出前调用 assert_artists_inside_canvas(fig)，"
+                "用实际渲染边界检查标题碰撞及标题、坐标标签和色标是否超出画布"
             )
 
         if violations:
@@ -473,6 +539,73 @@ def _scientific_plot_script_error(command: str, workdir: str) -> dict | None:
                 "violations": violations,
             }
     return None
+
+
+def _scientific_label_violations(source: str) -> list[str]:
+    """Find deterministic MathText escaping mistakes in plot labels."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    violations: list[str] = []
+    label_methods = {"set_label", "set_xlabel", "set_ylabel"}
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in label_methods
+            and node.args
+        ):
+            continue
+        label_node = node.args[0]
+        if not (isinstance(label_node, ast.Constant) and isinstance(label_node.value, str)):
+            continue
+        label = label_node.value
+        if label.count("$") % 2:
+            violations.append(
+                f"第 {node.lineno} 行的 {node.func.attr} 含有未配对的 `$`；"
+                "完整数学单位必须放在同一对 `$...$` 中"
+            )
+        math_segments = label.split("$")
+        text_segments = math_segments[::2]
+        math_commands = (r"\mathrm", r"\,", r"\frac", r"\cdot", r"\times")
+        if any(
+            command in segment
+            for segment in text_segments
+            for command in math_commands
+        ) or any(
+            re.search(r"(?<!\\)[_^]\{", segment) for segment in text_segments
+        ):
+            violations.append(
+                f"第 {node.lineno} 行的 {node.func.attr} 把 MathText 命令放在了 "
+                "`$...$` 外；请把完整单位写成例如 "
+                'r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)"'
+            )
+        if "\\\\" in label and any(
+            marker in label
+            for marker in ("\\\\mathrm", "\\\\,", "\\\\^", "\\\\_", "\\\\frac")
+        ):
+            violations.append(
+                f"第 {node.lineno} 行的 {node.func.attr} 生成了双反斜杠；"
+                "原始字符串 r\"...\" 中的 MathText 命令只能使用单反斜杠"
+            )
+        if re.search(r"\bPVU\b", label, flags=re.IGNORECASE):
+            if re.search(r"(?<!1)0\^\{\s*-?6\s*\}", label):
+                violations.append(
+                    f"第 {node.lineno} 行的 {node.func.attr} 把 PVU 的 "
+                    "`10^{-6}` 误写成了 `0^{-6}`"
+                )
+            canonical_pvu_unit = (
+                r"$10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$"
+            )
+            if canonical_pvu_unit not in label:
+                violations.append(
+                    f"第 {node.lineno} 行的 {node.func.attr} 的 PVU 单位格式不规范；"
+                    "请直接使用 "
+                    'r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)"'
+                )
+    return violations
 
 
 def _covered_download_code_shell_error(command: str) -> dict | None:

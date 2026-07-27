@@ -34,6 +34,28 @@ For China national maps intended for public release, reports, product pages, or 
 
 Do not let an inset dominate the data. Keep it small, consistent, and unobtrusive.
 
+When a South China Sea inset is present, the main panel and inset have distinct
+domains:
+
+- The **main panel** shows the compact national view: mainland China, Hainan,
+  Taiwan, and nearby waters. Its southern limit should normally be about
+  `18°N`; do not extend it to `2°N` merely to include the South China Sea
+  islands.
+- The **inset** alone shows the South China Sea domain, normally about
+  `[105, 123, 2, 25]`.
+- Do not derive the main-panel extent from the full multi-polygon China
+  boundary collection: the remote southern polygons will enlarge the extent,
+  shrink the useful mainland map, create whitespace, and duplicate the inset.
+- Data and boundaries may use the full China polygon collection for clipping,
+  but the main axes must use the compact main-panel extent. The axes extent,
+  not merely the clipping polygon, controls the visible geographic domain.
+
+For a conventional PlateCarree national map with an inset, start from
+`MAIN_EXTENT = [73, 136, 18, 54]` and adjust only when the requested data or
+publication standard requires it. Use `SCS_EXTENT = [105, 123, 2, 25]` only on
+the inset. If the main panel visibly contains the same South China Sea islands
+as the inset, the layout is wrong.
+
 When the user wants a filled-contour map clipped to China's boundary **and** a South China Sea inset, refer directly to the complete templates:
 
 - **PlateCarree** (simple rectangular grid): `examples/china-clipped-with-scs-inset.py`
@@ -62,6 +84,8 @@ Rules:
 - Using a boundary layer that is visibly offset from the gridded data because of CRS/transform mistakes.
 - Making administrative boundaries thicker or brighter than the meteorological signal.
 - Showing national maps without considering South China Sea/inset requirements.
+- Showing the South China Sea islands in both the national main panel and the
+  inset, or using the full China multi-polygon bounds as the main-panel extent.
 - Cropping out important upstream/downstream synoptic systems just to fit an administrative frame.
 - Using a map boundary source without knowing its provenance for public/commercial output.
 

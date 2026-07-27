@@ -21,6 +21,11 @@ Use this skill to produce or review meteorological research figures. The goal is
      `references/cross-section-wind-vectors.md`. Decide whether the vectors show
      horizontal wind, schematic in-plane circulation, or physical trajectories
      before selecting components or scaling.
+   - For a time series or scatter plot with maximum/minimum/event labels, read
+     `references/time-series.md` before placing annotations. Extreme-point
+     labels must use edge-aware placement and rendered checks for canvas,
+     legend, and plotted-data collisions rather than a fixed positive `xytext`
+     offset.
 
 2. Check the minimum metadata before drawing.
    - Inspect data metadata: variable name, dimensions, coordinates, units, valid time, level, region, and missing values.
@@ -58,7 +63,20 @@ Use this skill to produce or review meteorological research figures. The goal is
      (`$10^{-6}$`, `$m^2$`, `$kg^{-1}$`) rather than Unicode superscript
      glyphs such as `⁻`, `¹`, `²`, or `⁶`. This avoids missing-glyph boxes in
      CJK-capable display fonts. For example:
-     `cbar.set_label(r"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)")`.
+     `cbar.set_label(r"PVU ($10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$)")`.
+     In a raw string (`r"..."`), MathText commands use one backslash. In an
+     ordinary Python string, escape those backslashes:
+     `"PVU ($10^{-6}\\,\\mathrm{K\\,m^2\\,kg^{-1}\\,s^{-1}}$)"`.
+     Never combine a raw-string prefix with doubled MathText backslashes, and
+     keep the complete unit expression inside one balanced `$...$` pair.
+     MathText commands outside `$...$` are not interpreted: a label such as
+     `r"PVU (10^{-6}\,\mathrm{K\,m^2})"` will print the commands literally.
+     Do not reconstruct the PVU unit from memory or edit its tokens piecemeal;
+     copy this exact constant into the plotting script:
+     `PVU_LABEL = r"PVU ($10^{-6}\,\mathrm{K\,m^2\,kg^{-1}\,s^{-1}}$)"`.
+     Before running the script, verify `PVU_LABEL` is passed directly to
+     `cbar.set_label(...)`; never write `0^{-6}`, omit either `$`, or wrap only
+     part of the unit in math mode.
    - Read `references/publication-quality.md` before final export only when the user explicitly requests a paper, print, publication, high-resolution, or other large-format deliverable.
 
 7. Preserve reproducibility.
@@ -72,10 +90,17 @@ Use this skill to produce or review meteorological research figures. The goal is
    - Default to a delivered raster figure no larger than **500 KB** (that is, `500 * 1024` bytes). This is a hard delivery limit unless the user explicitly asks for a high-definition, print, publication, or large-format figure.
    - Start with a compact canvas and raster DPI (normally no larger than about 7 × 5 inches and 120 DPI), a layout engine such as `layout="compressed"`/`layout="constrained"`, and minimal padding. Do not enlarge the canvas just to fill screen space or use `bbox_inches="tight"` as a substitute for layout.
    - After every default raster export, check the actual file size. If it exceeds 500 KB, regenerate it with a smaller canvas/DPI and, if still readable, apply lossless PNG optimization or a suitable compressed format. Repeat until it is within the limit while keeping labels, colorbars, and key scientific features legible.
-   - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop pixels to meet the limit, detect and trim “white space” programmatically, save only a colorbar axis, or remove the main map/data axes. **Never use `bbox_inches="tight"` for a Cartopy map**, even when one exported image appears correct: Cartopy transforms, colorbars, and inset axes can produce an incomplete tight bounding box. Use `layout="compressed"`, a proportionate `figsize`, and colorbar padding instead.
+   - Reduce output size only by scaling the **entire figure** proportionally, lowering DPI, or using lossless/format compression. Never crop scientific content to meet the size limit, save only a colorbar axis, or remove the main map/data axes. **Never pass the string `bbox_inches="tight"` for a Cartopy map**, even when one exported image appears correct: Cartopy transforms, colorbars, and inset axes can produce an incomplete tight bounding box.
+   - First solve whitespace with the correct geographic extent, an aspect-matched `figsize`, `layout="compressed"`/`layout="constrained"`, and layout-aware title/colorbar placement. If those are correct but the exported file still has uniform **outer canvas** whitespace, use only the safe post-render fallbacks in `references/layout-and-export.md`: alpha-channel autocrop for PNG/WebP, or a manually computed fixed `Bbox` for PDF/SVG. Run the rendered-geometry checks before cropping and visually inspect the final cropped file. Do not use autocrop to hide a wrong extent, oversized axes allocation, or internal panel gaps.
    - Before reporting a figure, visually inspect the exported file (not only the plotting window) and verify that it includes the primary data panel, title/metadata where applicable, and colorbar/legend. If the exported dimensions or aspect ratio are implausible for the requested figure, treat it as a failed export and regenerate it rather than delivering it.
    - Treat a user request for "高清", "高分辨率", "大图", "出版", "印刷", "publication", "print", or an explicit pixel/DPI target as the only exception to the 500 KB default. State the resulting file size when using that exception.
    - When reporting a generated image, use Markdown image syntax such as `![description](figures/name.png)`.
+   - For every multi-panel Cartopy figure, read
+     `references/layout-and-export.md` before writing the plotting script. It
+     defines the single-layout-owner rule, title/colorbar placement, rendered
+     geometry checks, and a compact export pattern. These checks are mandatory
+     when the user reports clipped titles, excessive top/bottom whitespace, or
+     ineffective spacing changes.
 
 ## Safe compact export for Cartopy maps
 
@@ -143,6 +168,12 @@ complex GridSpec; do not combine either layout mode with `tight_layout()` or wit
 DPI (for example, 120 → 100 → 85) and re-export the same full Figure. Do not
 change axes positions or crop pixels to reduce file size.
 
+If correct layout still leaves a uniform blank strip outside the rendered artists,
+do not keep guessing `figsize` indefinitely. Follow the post-render safe-crop
+decision tree in `references/layout-and-export.md`. The literal string
+`bbox_inches="tight"` remains forbidden; a validated fixed `Bbox` and transparent
+outer-canvas raster crop are different, controlled operations.
+
 ## Regional PlateCarree map ticks and gridlines
 
 For a rectangular regional map on a plain `ccrs.PlateCarree()` axes, prefer
@@ -150,6 +181,12 @@ normal GeoAxes ticks over `gridlines(draw_labels=True)`. Cartopy Gridliner label
 can sit outside the layout bounds and be clipped at export. Standard ticks are
 known to Matplotlib's layout engine, so `layout="compressed"` or
 `layout="constrained"` reserves their space automatically.
+
+This is a required metadata rule, not an optional decoration: a geographic map
+must retain visible longitude and latitude labels. In a multi-panel grid, show
+latitude labels on every outer-left panel and longitude labels on every
+bottom-row panel. Never remove all latitude labels merely to make the layout
+more compact.
 
 ```python
 import numpy as np
@@ -190,6 +227,12 @@ from the extent, panel grid, and the actual title/colorbar reservations. Do not
 blindly change `figsize`, `pad`, or `panel_height` and claim that whitespace is
 reduced: use this calculation first.
 
+Before using the calculation below, follow the single-layout-owner rule in
+`references/layout-and-export.md`: create the Figure with exactly one layout
+engine; do not subsequently call `subplots_adjust`, `tight_layout`, or put a
+suptitle outside the canvas with `y > 1`. Pass layout options only to Figure
+creation (`plt.subplots`/`plt.figure`), never to `savefig`.
+
 ```python
 import numpy as np
 
@@ -223,40 +266,17 @@ fig, axes = plt.subplots(
 ```
 
 When a multi-panel figure has both `fig.suptitle(...)` and per-panel
-`ax.set_title(...)`, use this export guard immediately after adding the
-suptitle and before `savefig`. It measures the actual rendered text boxes and
-increases only the Figure height when the top-row title would collide with the
-suptitle:
-
-```python
-def ensure_suptitle_clearance(fig, axes, min_gap_px=8, max_passes=4):
-    suptitle = fig._suptitle
-    if suptitle is None:
-        return
-    for _ in range(max_passes):
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        suptitle_bottom = suptitle.get_window_extent(renderer).y0
-        panel_title_top = max(
-            ax.title.get_window_extent(renderer).y1
-            for ax in np.ravel(axes) if ax.title.get_text()
-        )
-        gap = suptitle_bottom - panel_title_top
-        if gap >= min_gap_px:
-            return
-        width, height = fig.get_size_inches()
-        fig.set_size_inches(width, height + (min_gap_px - gap) / fig.dpi + 0.08)
-    raise RuntimeError("总标题与子图标题仍然重叠；请增加标题预留高度")
-
-fig.suptitle("…")
-ensure_suptitle_clearance(fig, axes)
-fig.savefig("figures/map.png", dpi=120, facecolor="white")
-```
+`ax.set_title(...)`, do not run a second helper that changes Figure height or
+axes positions after compressed layout. Such a helper can read non-finite
+intermediate Cartopy geometry and make the canvas infinitely tall. Add all
+artists, draw once, then run `assert_artists_inside_canvas(fig)` from
+`references/layout-and-export.md`. It checks both canvas bounds and the gap
+between the suptitle and top-row panel titles.
 
 Never set the title/colorbar reservation to zero merely to reduce whitespace.
-The guard is a required final check for this title combination; if it raises,
-increase the compact-layout reservation rather than deleting titles or using
-`bbox_inches="tight"`.
+If the acceptance guard raises, change the initial compact `figsize` or font
+sizes and render again rather than deleting titles, manually moving axes, or
+using `bbox_inches="tight"`.
 
 Set `extent` from the study boundary's bounds plus modest geographic padding
 (normally 3–6% of longitude and latitude spans) before calling this function;
@@ -310,18 +330,26 @@ than treating the first panel as the only complete map:
 - Draw the applicable national, provincial, or study-area boundary and a light
   dashed longitude/latitude grid in every panel. Use ordinary GeoAxes ticks and
   show labels only on the outer left and bottom edges, so interior panels retain
-  the grid without duplicated labels.
+  the grid without duplicated labels. Apply `LongitudeFormatter` and
+  `LatitudeFormatter`; `set_xticks`/`set_yticks` alone otherwise leave plain
+  numbers rather than geographic labels.
 - Add a bottom-right South China Sea inset to **every panel only when the main
   view is a national China map**. Clip those national main panels to the
   mainland polygon, but render each inset with the full China polygon collection
   so South China Sea islands are not lost. Do **not** add a South China Sea inset
   to a provincial, city, or other regional map such as Shaanxi.
+- When an inset is present, the main national panel must use a compact extent
+  such as `[73, 136, 18, 54]`; the inset alone uses the South China Sea extent
+  such as `[105, 123, 2, 25]`. Never show the remote South China Sea islands in
+  both places and never derive the main-panel extent from the full China
+  multi-polygon bounds. That duplication is cartographically redundant and
+  makes the mainland map smaller while increasing whitespace.
 - Use `layout="compressed"` for the fixed-aspect panel grid and one external shared
   colorbar; do not add a separate colorbar for each panel.
 
 ```python
 # Shared setup before the loop.
-extent, scs_extent = [72, 136, 15, 55], [105, 123, 2, 25]
+extent, scs_extent = [73, 136, 18, 54], [105, 123, 2, 25]
 lon_ticks, lat_ticks = np.arange(80, 136, 10), np.arange(20, 56, 10)
 
 for index, (ax, field) in enumerate(zip(axes.flat, fields)):
@@ -335,6 +363,8 @@ for index, (ax, field) in enumerate(zip(axes.flat, fields)):
     ax.set_extent(extent, crs=ccrs.PlateCarree())
     ax.set_xticks(lon_ticks, crs=ccrs.PlateCarree())
     ax.set_yticks(lat_ticks, crs=ccrs.PlateCarree())
+    ax.xaxis.set_major_formatter(LongitudeFormatter())
+    ax.yaxis.set_major_formatter(LatitudeFormatter())
     ax.tick_params(axis="x", labelbottom=(row == 1), labelsize=7)
     ax.tick_params(axis="y", labelleft=(col == 0), labelsize=7)
     ax.gridlines(xlocs=lon_ticks, ylocs=lat_ticks, draw_labels=False,
@@ -371,6 +401,10 @@ Read only the files needed for the task:
 - `Safe compact export for Cartopy maps` above: Default pattern for a one-panel Cartopy map with a colorbar. Use it before introducing manual axes positions or any tight-bbox export.
 - `Regional PlateCarree map ticks and gridlines` above: Default label/grid pattern for a rectangular local PlateCarree map; use it to avoid clipped Gridliner labels.
 - `references/publication-quality.md`: Multi-panel layout, journal/export quality, typography, CJK font handling with mplfonts, labels, colorbar placement, accessibility.
+- `references/layout-and-export.md`: **Required for every multi-panel Cartopy
+  figure and every clipped-title/excess-whitespace correction.** Use one layout
+  owner, reserve titles and colorbars through layout-aware artists, validate
+  rendered artist bounds before export, and inspect the exported raster.
 - `references/reproducibility.md`: Metadata, processing disclosure, station interpolation, anomaly baselines, significance marking, QA checklist.
 - `references/time-series.md`: Time-axis rules, UTC/local time, accumulations, dual axes, verification plots, ensemble/uncertainty display.
 - `references/cjk-fonts.md`: Quick reference for CJK tofu-box font rendering issues with mplfonts.
@@ -398,7 +432,7 @@ These rules must be followed without exception. They override convenience, aesth
   normalized, clipped, or screen-coordinate quiver as a true airflow angle or
   true two-dimensional speed. State the vertical variable, units, multiplier,
   normalization/clipping, and the meaning of the reference arrow on the figure.
-- **Multi-panel title clearance**: If a multi-panel Figure has both a `suptitle` and per-panel titles, call `ensure_suptitle_clearance(fig, axes)` after setting the titles and before export. Never reduce its title/colorbar reservations to zero or deliver overlapping text.
+- **Multi-panel title clearance**: Call `assert_artists_inside_canvas(fig)` after all titles and colorbars are present and immediately before export. It must reject title collisions and clipped artists. Never mutate Figure height or axes positions after compressed layout, reduce title/colorbar reservations to zero, or deliver overlapping/clipped text.
 - Never use a diverging colormap for a strictly positive scalar field unless it encodes a meaningful threshold.
 - Never use a sequential colormap for an anomaly/bias field that needs positive/negative symmetry.
 - Never use dense wind arrows or dense significance dots that cover the actual meteorological field.
@@ -409,6 +443,8 @@ These rules must be followed without exception. They override convenience, aesth
 - Never present interpolated station fields, reanalysis fields, smoothed fields, or AI-generated/infilled radar frames as raw observations. All processing methods must be disclosed.
 - **China boundaries (HIGHEST PRIORITY)**: Whenever a map involves China's territory (Mainland, Taiwan, Hong Kong, Macau, South China Sea islands, etc.), you MUST use `cnmaps` for boundary data. Using `cartopy.feature.BORDERS`, `cartopy.feature.COASTLINE`, or any NaturalEarth-based global boundary for China's border is FORBIDDEN. Before writing any plotting code for a China-involved map, you MUST first read `skills/builtin/cnmaps/references/api-cheatsheet.md` and `skills/builtin/cnmaps/references/plotting-patterns.md`. This rule applies even if the user does not explicitly mention `cnmaps` or China boundaries.
 - **Global fill map seam**: Whenever plotting a global `contourf` or `pcolormesh` map where longitude spans 0°–360° (or -180°–180°) with `ax.set_global()`, you MUST call `cartopy.util.add_cyclic_point` to close the longitude seam. A white-line gap at the 0°/360° meridian is unacceptable for publication-quality output. See `references/meteorological-maps.md` for the exact usage pattern.
+- **Display domain must match the clip domain**: Never use a broad regional extent (for example East Asia) while clipping the plotted field to one country (for example China), unless the user explicitly requests blank surroundings. Regional synoptic fields remain un-clipped with administrative boundaries drawn as overlays. Country-only thematic maps may be clipped, but the axes extent must then fit that country. See `references/meteorological-maps.md`.
+- **Map canvas must match rendered aspect**: After the domain and clip are correct, do not estimate the final canvas solely with `longitude_span / latitude_span` or add arbitrary side-width constants. Cartopy's fixed-aspect GeoAxes, the actual `set_extent(...)`, and layout-aware decorations determine the rendered panel size. For a one-panel map, render once, measure `ax.get_position().width`, and perform one Figure-width correction toward roughly 78–84% main-axes occupancy; keep vertical title/colorbar space intact and rerun canvas-bound checks. See `references/meteorological-maps.md`.
 - Never use decorative basemaps, 3D effects, glow effects, or busy backgrounds for scientific defaults.
 
 ## Python ecosystem defaults
