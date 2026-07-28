@@ -1,0 +1,4 @@
+interface:
+  display_name: "气象准确率测评"
+  short_description: "使用 cyeva 完成气象预报准确率评估与观测数据对比"
+  default_prompt: "使用 $weather-verification 和 cyeva 对预报与观测数据进行气象准确率测评，并解释结果。"

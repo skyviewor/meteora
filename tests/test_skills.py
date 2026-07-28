@@ -178,3 +178,26 @@ def test_skill_context_mentions_references_without_loading_them(tmp_path):
 
     assert "references/maps.md" in context
     assert "Detailed map rules should not be injected." not in context
+
+
+def test_builtin_weather_verification_skill_is_selected_for_chinese_request():
+    selected = SkillSelector().select(
+        "用观测数据对气象预报做准确率测评，计算温度 RMSE 和降水 TS、ETS"
+    )
+
+    assert "weather-verification" in [item.skill.name for item in selected]
+
+
+def test_builtin_weather_verification_skill_is_selected_for_english_request():
+    selected = SkillSelector().select(
+        "Verify a deterministic weather forecast against observations by lead time"
+    )
+
+    assert "weather-verification" in [item.skill.name for item in selected]
+
+
+def test_weather_verification_context_points_to_cyeva_reference():
+    selected = SkillSelector().select("对预报和观测做预报检验")
+    context = render_skill_context(selected)
+
+    assert "references/cyeva-api.md" in context
