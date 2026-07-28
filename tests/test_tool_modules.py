@@ -56,6 +56,7 @@ MIGRATED_TOOLS = (
     "read_pdf",
     "preview_image",
     "preview_pdf",
+    "prepare_issue_link",
     "ensure_runtime_tools",
     "run_shell",
     "list_downloads",

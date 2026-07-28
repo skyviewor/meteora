@@ -104,6 +104,7 @@ from aero.toolbox.tools.email import (
     configure_email_config,
     send_email,
 )
+from aero.toolbox.tools.feedback import prepare_issue_link
 from aero.toolbox.tools.era5 import (
     _reuse_existing_era5_file,
     _summarize_dataset,
@@ -175,6 +176,7 @@ from aero.toolbox.tools.tool_rounds import get_max_tool_rounds, set_max_tool_rou
 
 __all__ = [
     "cancel_sub_agent",
+    "prepare_issue_link",
     "check_ads_config",
     "check_cds_config",
     "check_earthdata_config",
