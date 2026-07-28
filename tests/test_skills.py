@@ -201,3 +201,15 @@ def test_weather_verification_context_points_to_cyeva_reference():
     context = render_skill_context(selected)
 
     assert "references/cyeva-api.md" in context
+
+
+def test_builtin_weather_verification_requires_executed_cyeva():
+    skill_text = Path(
+        "src/aero/skills/builtin/weather-verification/SKILL.md"
+    ).read_text()
+
+    assert "## Mandatory execution gate" in skill_text
+    assert "Merely installing or importing the package does not satisfy" in skill_text
+    assert "must never replace" in skill_text
+    assert "the cyeva result" in skill_text
+    assert "must name the cyeva version and comparison class used" in skill_text

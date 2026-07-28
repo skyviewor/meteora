@@ -179,10 +179,10 @@ def test_runtime_diagnostics_requires_python_312(monkeypatch, tmp_path):
     assert checks[-1] == ("Python 版本", True, "3.12.9")
 
 
-def test_common_package_files_keep_cnmaps_pip_only():
+def test_common_package_files_keep_pip_only_runtime_packages():
     assert "python=3.12" in init_runtime._conda_packages()
     assert "cnmaps" not in init_runtime._conda_packages()
-    assert init_runtime._pip_packages() == ("mplfonts", "cnmaps")
+    assert init_runtime._pip_packages() == ("mplfonts", "cnmaps", "cyeva>=0.2.3,<0.3")
 
 
 def test_conda_helper_documents_managed_runtime_and_pip_only_cnmaps():

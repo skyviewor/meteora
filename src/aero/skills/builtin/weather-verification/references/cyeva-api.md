@@ -1,7 +1,8 @@
 # cyeva API and verification reference
 
-This reference targets the API exposed by the local cyeva project and cyeva
-`0.1.0.beta.10`. Verify the installed version before relying on method details.
+This reference documents the cyeva comparison API used by Aerolytica. The managed runtime
+installs cyeva 0.2.x; record the installed version and verify method signatures when the
+package version changes.
 
 ## Imports and paired preprocessing
 

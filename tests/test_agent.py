@@ -331,6 +331,19 @@ def test_build_system_prompt_injects_selected_skill_context():
     assert "Use publication-quality labels." in prompt
 
 
+def test_build_system_prompt_enforces_cyeva_for_weather_verification():
+    config = AeroConfig.create_default()
+    prompt = build_system_prompt(
+        config,
+        skill_context="### weather-verification\nUse cyeva for forecast verification.",
+    )
+
+    assert "weather-verification 强制约束" in prompt
+    assert "所有正式测评指标必须来自实际执行的 `cyeva`" in prompt
+    assert "NumPy/手算只允许在 cyeva 已产出主结果后做独立抽查" in prompt
+    assert "若仍无法执行，必须说明阻塞并停止" in prompt
+
+
 def test_user_facing_text_hides_internal_tool_names():
     from aero.agent.loop import _sanitize_user_facing_text
 

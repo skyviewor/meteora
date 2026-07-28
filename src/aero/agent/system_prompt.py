@@ -654,10 +654,33 @@ read only the specific resource needed for the task.
 def _skill_enforcement(skill_context: str, lang: str) -> str:
     has_sciplot = "### scientific-plotting" in skill_context
     has_cnmaps = "### cnmaps" in skill_context
-    if not has_sciplot and not has_cnmaps:
+    has_weather_verification = "### weather-verification" in skill_context
+    if not has_sciplot and not has_cnmaps and not has_weather_verification:
         return ""
 
     blocks: list[str] = []
+
+    if has_weather_verification:
+        if lang == "zh":
+            blocks.append("""### weather-verification 强制约束
+当 `weather-verification` Skill 被激活时，以下规则为**硬性要求**：
+
+1. 所有正式测评指标必须来自实际执行的 `cyeva` 比较对象及其方法；禁止只用 NumPy、pandas、xarray 或手写公式计算后交付。
+2. 写测评代码前必须读取 `references/cyeva-api.md`，检查 `import cyeva`，记录版本，并选择正确的 Comparison 类。
+3. 仅安装或导入 `cyeva` 不算完成。执行脚本必须实例化对应比较类并实际调用指标方法。
+4. NumPy/手算只允许在 cyeva 已产出主结果后做独立抽查，不得替代主结果。
+5. 若缺少依赖，只能安装到 Aero 托管环境；若仍无法执行，必须说明阻塞并停止，禁止用其他实现静默兜底。
+6. 最终结果必须写明 cyeva 版本、比较类、样本匹配/QC 数量；没有成功执行 cyeva 方法就不得宣称测评完成。""")
+        else:
+            blocks.append("""### weather-verification Enforcement (HARD RULE)
+When the `weather-verification` skill is active:
+
+1. Every reported verification metric MUST come from an actually executed `cyeva` comparison object and method. A NumPy/pandas/xarray/manual-only result MUST NOT be delivered.
+2. Read `references/cyeva-api.md` before coding, import cyeva, record its version, and select the correct Comparison class.
+3. Installing or importing cyeva is not sufficient. The executed script MUST instantiate the comparison class and call its metric methods.
+4. NumPy/manual calculations are permitted only as an independent check after cyeva produces the primary result.
+5. Install a missing dependency only in Aero's managed environment. If cyeva still cannot execute, report the blocker and stop; do not silently fall back.
+6. The final result MUST identify the cyeva version, comparison class, and matched/QC sample counts. Never claim completion without a successful cyeva metric call.""")
 
     if has_sciplot:
         if lang == "zh":
