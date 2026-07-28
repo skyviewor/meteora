@@ -755,11 +755,23 @@ def _covered_data_shell_error(command: str) -> dict | None:
                 "suggested_tools": ["search_cds_variables", "download_era5"],
                 "command": _redact_shell_command(command),
             }
+        if _is_gfs_data_url(url):
+            return {
+                "status": "error",
+                "covered_data_source": True,
+                "message": (
+                    "GFS/NOMADS/AWS 数据源已有专用工具覆盖。不要用 "
+                    "run_shell/curl/wget 自行下载；GFS 适配器会在 TLS 失败时"
+                    "自动切换受控传输后端，并继续按 .idx 精确下载所需字段。"
+                ),
+                "suggested_tools": ["inspect_gfs_inventory", "download_gfs"],
+                "command": _redact_shell_command(command),
+            }
     return None
 
 
 def _is_covered_data_url(url: str) -> bool:
-    return _is_ads_cams_url(url) or _is_cds_dataset_url(url)
+    return _is_ads_cams_url(url) or _is_cds_dataset_url(url) or _is_gfs_data_url(url)
 
 
 def _is_ads_cams_url(url: str) -> bool:
@@ -776,6 +788,18 @@ def _is_cds_dataset_url(url: str) -> bool:
     host = parsed.netloc.lower()
     path = parsed.path.lower()
     return host == "cds.climate.copernicus.eu" and "/datasets" in path
+
+
+def _is_gfs_data_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    path = parsed.path.lower()
+    if host == "nomads.ncep.noaa.gov":
+        return "/gfs/" in path
+    return host in {
+        "noaa-gfs-bdp-pds.s3.amazonaws.com",
+        "noaa-gfs-bdp-pds.s3.us-east-1.amazonaws.com",
+    } and (path.startswith("/gfs.") or "/gfs." in path)
 
 
 def _shell_urls(command: str) -> list[str]:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -179,13 +181,66 @@ class GFSAdapter:
 
     @staticmethod
     def _fetch_text(url: str) -> str:
+        try:
+            return GFSAdapter._fetch_text_httpx(url)
+        except httpx.TransportError as exc:
+            if not _is_tls_error(exc):
+                raise
+            emit_progress("Python TLS 连接失败，正在使用系统传输后端读取 GFS 索引")
+            return GFSAdapter._fetch_text_curl(url)
+
+    @staticmethod
+    def _fetch_text_httpx(url: str) -> str:
         with httpx.Client(timeout=30, follow_redirects=True) as client:
             resp = client.get(url)
             resp.raise_for_status()
             return resp.text
 
     @staticmethod
+    def _fetch_text_curl(url: str) -> str:
+        curl = _curl_executable()
+        result = subprocess.run(
+            [
+                curl,
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--retry",
+                "2",
+                "--connect-timeout",
+                "30",
+                url,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return result.stdout.decode("utf-8")
+
+    @staticmethod
     def _download_ranges(
+        url: str,
+        entries: list[GFSIndexEntry],
+        dest: Path,
+        total_bytes: int,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        try:
+            return GFSAdapter._download_ranges_httpx(
+                url, entries, dest, total_bytes, on_progress
+            )
+        except httpx.TransportError as exc:
+            if not _is_tls_error(exc):
+                raise
+            emit_progress(
+                "Python TLS 连接失败，正在使用系统传输后端继续按 GFS 索引精确下载"
+            )
+            return GFSAdapter._download_ranges_curl(
+                url, entries, dest, total_bytes, on_progress
+            )
+
+    @staticmethod
+    def _download_ranges_httpx(
         url: str,
         entries: list[GFSIndexEntry],
         dest: Path,
@@ -217,6 +272,92 @@ class GFSAdapter:
                                 on_progress(done, total_bytes)
         tmp.replace(dest)
         return done
+
+    @staticmethod
+    def _download_ranges_curl(
+        url: str,
+        entries: list[GFSIndexEntry],
+        dest: Path,
+        total_bytes: int,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> int:
+        curl = _curl_executable()
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        if tmp.exists():
+            tmp.unlink()
+        if dest.exists():
+            dest.unlink()
+
+        done = 0
+        try:
+            with tmp.open("wb") as out:
+                for entry in entries:
+                    if cancel_requested():
+                        raise RuntimeError("下载已取消")
+                    byte_range = entry.range_header.removeprefix("bytes=")
+                    process = subprocess.Popen(
+                        [
+                            curl,
+                            "--fail",
+                            "--location",
+                            "--silent",
+                            "--show-error",
+                            "--retry",
+                            "2",
+                            "--connect-timeout",
+                            "30",
+                            "--range",
+                            byte_range,
+                            url,
+                        ],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                    assert process.stdout is not None
+                    while chunk := process.stdout.read(CHUNK_SIZE):
+                        if cancel_requested():
+                            process.terminate()
+                            raise RuntimeError("下载已取消")
+                        out.write(chunk)
+                        done += len(chunk)
+                        if on_progress and total_bytes > 0:
+                            on_progress(done, total_bytes)
+                    _, stderr = process.communicate()
+                    if process.returncode:
+                        raise RuntimeError(
+                            "系统传输后端下载 GFS 数据失败："
+                            + stderr.decode("utf-8", errors="replace").strip()
+                        )
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        tmp.replace(dest)
+        return done
+
+
+def _is_tls_error(exc: BaseException) -> bool:
+    """Return whether an HTTP transport failure is specifically TLS-related."""
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "ssl",
+            "tls",
+            "certificate",
+            "cert_verify",
+            "wrong version number",
+        )
+    )
+
+
+def _curl_executable() -> str:
+    """Resolve curl for the adapter-owned TLS fallback."""
+    executable = shutil.which("curl")
+    if not executable:
+        raise RuntimeError(
+            "Python TLS 连接失败，且系统未安装 curl，无法启用 GFS 安全传输兜底"
+        )
+    return executable
 
 
 def parse_gfs_idx(text: str) -> list[GFSIndexEntry]:

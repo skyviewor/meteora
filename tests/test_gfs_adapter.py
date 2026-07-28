@@ -1,3 +1,7 @@
+import io
+import subprocess
+
+import httpx
 import pytest
 
 from aero.adapters.gfs_adapter import (
@@ -100,6 +104,101 @@ def test_download_ranges_uses_http_range_headers(tmp_path, monkeypatch):
     assert seen_ranges == ["bytes=0-998970", "bytes=998971-1101951"]
     assert size == dest.stat().st_size
     assert dest.read_bytes() == b"bytes=0-998970bytes=998971-1101951"
+
+
+def test_fetch_text_uses_controlled_fallback_for_tls_error(monkeypatch):
+    def fail_httpx(url):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+
+    seen = []
+
+    def fake_curl(url):
+        seen.append(url)
+        return IDX_TEXT
+
+    monkeypatch.setattr(GFSAdapter, "_fetch_text_httpx", staticmethod(fail_httpx))
+    monkeypatch.setattr(GFSAdapter, "_fetch_text_curl", staticmethod(fake_curl))
+
+    assert GFSAdapter._fetch_text("https://example.com/gfs.idx") == IDX_TEXT
+    assert seen == ["https://example.com/gfs.idx"]
+
+
+def test_fetch_text_does_not_fallback_for_non_tls_transport_error(monkeypatch):
+    def fail_httpx(url):
+        raise httpx.ConnectError("connection refused")
+
+    def unexpected_curl(url):
+        raise AssertionError("non-TLS errors must not use the curl fallback")
+
+    monkeypatch.setattr(GFSAdapter, "_fetch_text_httpx", staticmethod(fail_httpx))
+    monkeypatch.setattr(GFSAdapter, "_fetch_text_curl", staticmethod(unexpected_curl))
+
+    with pytest.raises(httpx.ConnectError, match="connection refused"):
+        GFSAdapter._fetch_text("https://example.com/gfs.idx")
+
+
+def test_curl_range_fallback_preserves_idx_ranges(tmp_path, monkeypatch):
+    entries = parse_gfs_idx(IDX_TEXT)[:2]
+    dest = tmp_path / "subset.grib2"
+    commands = []
+    payloads = iter([b"first", b"second"])
+
+    class FakeProcess:
+        def __init__(self, command):
+            commands.append(command)
+            self.stdout = io.BytesIO(next(payloads))
+            self.stderr = io.BytesIO()
+            self.returncode = 0
+
+        def communicate(self):
+            return b"", self.stderr.read()
+
+        def terminate(self):
+            self.returncode = -15
+
+    monkeypatch.setattr(
+        "aero.adapters.gfs_adapter._curl_executable",
+        lambda: "/usr/bin/curl",
+    )
+    monkeypatch.setattr(
+        "aero.adapters.gfs_adapter.subprocess.Popen",
+        lambda command, **kwargs: FakeProcess(command),
+    )
+
+    size = GFSAdapter._download_ranges_curl(
+        "https://example.com/gfs",
+        entries,
+        dest,
+        total_bytes=11,
+    )
+
+    assert size == 11
+    assert dest.read_bytes() == b"firstsecond"
+    assert [command[command.index("--range") + 1] for command in commands] == [
+        "0-998970",
+        "998971-1101951",
+    ]
+
+
+def test_fetch_text_curl_uses_fail_and_retry(monkeypatch):
+    seen = []
+
+    def fake_run(command, **kwargs):
+        seen.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout=IDX_TEXT.encode())
+
+    monkeypatch.setattr(
+        "aero.adapters.gfs_adapter._curl_executable",
+        lambda: "/usr/bin/curl",
+    )
+    monkeypatch.setattr("aero.adapters.gfs_adapter.subprocess.run", fake_run)
+
+    assert GFSAdapter._fetch_text_curl("https://example.com/gfs.idx") == IDX_TEXT
+    command, kwargs = seen[0]
+    assert command[0] == "/usr/bin/curl"
+    assert "--fail" in command
+    assert command[command.index("--retry") + 1] == "2"
+    assert kwargs == {"check": True, "capture_output": True}
 
 
 @pytest.mark.asyncio

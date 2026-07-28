@@ -1015,6 +1015,40 @@ async def test_run_shell_rejects_ads_url_hidden_inside_python(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "url",
+    [
+        (
+            "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
+            "gfs.20260728/00/atmos/gfs.t00z.pgrb2.0p25.f000"
+        ),
+        (
+            "https://noaa-gfs-bdp-pds.s3.amazonaws.com/"
+            "gfs.20260728/00/atmos/gfs.t00z.pgrb2.0p25.f000"
+        ),
+    ],
+)
+async def test_run_shell_rejects_direct_gfs_download(monkeypatch, url):
+    from aero.agent.runtime import Runtime
+    from aero.toolbox import builtin_tools
+
+    async def fail_if_called(self, *args, **kwargs):
+        raise AssertionError("run_shell should reject direct GFS downloads before execution")
+
+    monkeypatch.setattr(Runtime, "run_subprocess_streaming", fail_if_called)
+
+    result = await builtin_tools.run_shell(
+        f"curl -L -o gfs.grib2 {url}",
+        "download GFS directly",
+    )
+
+    assert result["status"] == "error"
+    assert result["covered_data_source"] is True
+    assert result["suggested_tools"] == ["inspect_gfs_inventory", "download_gfs"]
+    assert "自动切换受控传输后端" in result["message"]
+
+
+@pytest.mark.asyncio
 async def test_run_shell_rejects_cdsapi_download_code(monkeypatch):
     from aero.agent.runtime import Runtime
     from aero.toolbox import builtin_tools
