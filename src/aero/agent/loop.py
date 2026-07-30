@@ -7,6 +7,7 @@ import asyncio
 import json
 import re
 import shlex
+import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from urllib.parse import quote, unquote, urlparse, urlunparse
@@ -1056,6 +1057,9 @@ class AgentLoop:
         self._current_user_message = ""
         self._vision_analyses_this_turn = 0
         self._successful_vision_images: dict[str, tuple[int, int] | None] = {}
+        self._official_mcp = None
+        self._official_mcp_tools: list[dict] = []
+        self._official_mcp_tool_names: set[str] = set()
         self.tracker = TokenTracker()
 
     def reset_system_prompt(self, language: str) -> None:
@@ -1098,11 +1102,17 @@ class AgentLoop:
         allowed_destructive_memo_tools = _destructive_memo_tools_for_text(
             self._current_user_message
         )
+        official_managed_tools = (
+            {"search_web", "check_web_search_status"}
+            if self.config.llm.provider == "official"
+            else set()
+        )
         return [
             tool
             for tool in tools
             if tool.get("function", {}).get("name")
             not in ({"delete_memo", "clear_memos"} - allowed_destructive_memo_tools)
+            and tool.get("function", {}).get("name") not in official_managed_tools
             and not (
                 tool.get("function", {}).get("name") == "search_web"
                 and not self.config.web_search.enabled
@@ -1114,11 +1124,53 @@ class AgentLoop:
         return False
 
     def _external_web_search_block_reason(self, tool_name: str) -> str | None:
-        """Never block the explicit search tool in favor of model-side search."""
+        """Keep official Relay search separate from client-managed search tools."""
+        if self.config.llm.provider == "official" and tool_name in {
+            "search_web",
+            "check_web_search_status",
+        } and tool_name not in self._official_mcp_tool_names:
+            return (
+                "当前使用 Aerolytica 官方模型，但本轮官方 MCP 未提供该工具；"
+                "客户端不会改用外部网页搜索服务。"
+            )
         return None
+
+    async def _tools_for_turn(self) -> list[dict]:
+        tools = self._allowed_tools()
+        self._official_mcp_tools = []
+        self._official_mcp_tool_names = set()
+        if self.config.llm.provider != "official":
+            return tools
+        if self._official_mcp is None:
+            from aero.core.official_mcp import OfficialMcpClient
+
+            self._official_mcp = OfficialMcpClient()
+        try:
+            remote_tools = await self._official_mcp.list_tools()
+        except Exception as exc:
+            debug_log("agent.official_mcp_prepare_failed", error=repr(exc))
+            self.messages[0].content += (
+                "\n\n本轮 Aerolytica 官方 MCP 不可用。"
+                "不要把模型记忆描述成实时检索结果，并向用户明确说明无法完成联网核验。"
+            )
+            return tools
+        self._official_mcp_tools = remote_tools
+        self._official_mcp_tool_names = {
+            str(tool.get("function", {}).get("name") or "")
+            for tool in remote_tools
+            if tool.get("function", {}).get("name")
+        }
+        debug_log(
+            "agent.official_mcp_prepared",
+            decision="model",
+            tools=sorted(self._official_mcp_tool_names),
+        )
+        return tools + remote_tools
 
     async def close(self):
         await self.llm.close()
+        if self._official_mcp is not None:
+            await self._official_mcp.close()
 
     def _record_llm_usage(self, usage: dict | None) -> None:
         self.tracker.add_llm(
@@ -1139,8 +1191,8 @@ class AgentLoop:
         self.messages = _sanitize_tool_message_sequence(self.messages)
         self._refresh_system_prompt_for_turn(user_message)
         self.messages.append(Message(role="user", content=user_message))
-
-        tools = self._allowed_tools()
+        self.llm.relay_turn_id = uuid.uuid4().hex
+        tools = await self._tools_for_turn()
 
         try:
             text, tool_calls = await self.llm.chat_with_tools(self.messages, tools)
@@ -1191,7 +1243,8 @@ class AgentLoop:
         self._refresh_system_prompt_for_turn(user_message)
         message_start = len(self.messages)
         self.messages.append(Message(role="user", content=user_message))
-        tools = self._allowed_tools()
+        self.llm.relay_turn_id = uuid.uuid4().hex
+        tools = await self._tools_for_turn()
 
         try:
             accumulated_text = ""
@@ -1325,6 +1378,35 @@ class AgentLoop:
                 resolved = str(Path(path).resolve())
                 self._successful_vision_images[resolved] = _image_fingerprint(Path(path))
 
+    def _is_official_mcp_tool(self, tool_name: str) -> bool:
+        return (
+            self.config.llm.provider == "official"
+            and tool_name in self._official_mcp_tool_names
+        )
+
+    async def _call_official_mcp(self, tool_call: ToolCall) -> str:
+        if self._official_mcp is None:
+            return json.dumps(
+                {"error": "Aerolytica 官方 MCP 客户端尚未初始化。"},
+                ensure_ascii=False,
+            )
+        try:
+            result = await self._official_mcp.call(
+                tool_call.name,
+                self._parse_tool_args(tool_call),
+            )
+        except Exception as exc:
+            debug_log(
+                "agent.official_mcp_call_failed",
+                tool_name=tool_call.name,
+                error=repr(exc),
+            )
+            return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        content = result.get("content")
+        if isinstance(content, str):
+            return content
+        return json.dumps(result, ensure_ascii=False, default=str)
+
     async def _handle_tool_calls(
         self, tool_calls: list[ToolCall], text: str
     ) -> str:
@@ -1338,6 +1420,13 @@ class AgentLoop:
             groups.setdefault(tc.name, []).append(tc)
 
         for tool_name, calls in groups.items():
+            if self._is_official_mcp_tool(tool_name):
+                for tc in calls:
+                    result = await self._call_official_mcp(tc)
+                    self.messages.append(
+                        Message(role="tool", content=result, tool_call_id=tc.id)
+                    )
+                continue
             spec = self.registry.get(tool_name)
             if spec is None:
                 err = f"当前操作不可用：{_sanitize_user_facing_text(tool_name)}"
@@ -1442,7 +1531,7 @@ class AgentLoop:
         )
 
         pending_calls = tool_calls
-        tools = self._allowed_tools()
+        tools = self._allowed_tools() + self._official_mcp_tools
 
         for round_index in range(self.max_tool_rounds):
             debug_log(
@@ -1544,6 +1633,26 @@ class AgentLoop:
 
         for tool_name, calls in groups.items():
             debug_log("agent.tool_group_started", tool_name=tool_name, calls=len(calls))
+            if self._is_official_mcp_tool(tool_name):
+                for tc in calls:
+                    yield StreamEvent(
+                        type="status",
+                        content="正在通过 Aerolytica 官方 MCP 搜索网页...",
+                    )
+                    result = await self._call_official_mcp(tc)
+                    failed = result.lstrip().startswith('{"error"')
+                    yield StreamEvent(
+                        type="status",
+                        content=(
+                            "Aerolytica 官方 MCP 搜索失败"
+                            if failed
+                            else "Aerolytica 官方 MCP 搜索完成"
+                        ),
+                    )
+                    self.messages.append(
+                        Message(role="tool", content=result, tool_call_id=tc.id)
+                    )
+                continue
             if (
                 tool_name in {"delete_memo", "clear_memos"}
                 and tool_name

@@ -16,12 +16,13 @@ from textual.screen import Screen
 from textual.widgets import Input, OptionList, Static
 from textual.widgets._option_list import Option
 
-from aero.core.types import Message
 from aero.core.llm_providers import (
     BUILTIN_LLM_PROVIDERS,
+    OFFICIAL_ACCOUNT_UI_ENABLED,
     model_supports_vision,
     model_tags,
 )
+from aero.core.types import Message
 
 
 def model_option_prompt(
@@ -368,18 +369,33 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
         if self._page == "source":
             subtitle.update("步骤 1 / 2：先配置主模型。主模型负责对话、规划、工具调用与数据分析。")
             assert options is not None
-            options.clear_options()
-            options.add_options([
+            source_options = [
                 Option("使用自定义 API Key 或兼容接口", id="custom"),
-                Option("使用 Aerolytica 官方账号", id="official"),
-            ])
+            ]
+            if OFFICIAL_ACCOUNT_UI_ENABLED:
+                source_options.append(
+                    Option("使用 Aerolytica 官方账号", id="official")
+                )
+            options.clear_options()
+            options.add_options(source_options)
             options.highlighted = 0
             options.focus()
         elif self._page == "official":
-            subtitle.update("官方账号需要设备授权服务。当前客户端尚未配置官方认证端点，请暂时使用自己的 API Key。")
-            self._set_actions(next_visible=True, back_visible=False)
-            self.query_one("#setup-next", Static).update("返回选择")
-            self._focus_actions()
+            subtitle.update(
+                "使用邮箱和密码登录。"
+                "密码只用于本次请求，不会保存到本地。"
+            )
+            form.display = True
+            email = self.query_one("#setup-url", Input)
+            email.placeholder = "邮箱"
+            email.value = ""
+            self.query_one("#setup-model", Input).display = False
+            password = self.query_one("#setup-key", Input)
+            password.placeholder = "密码"
+            password.value = ""
+            self._set_actions(next_visible=True, back_visible=True)
+            self.query_one("#setup-next", Static).update("登录并继续")
+            email.focus()
         elif self._page == "primary_provider":
             subtitle.update("选择主模型服务商。下一步会列出该服务商支持的模型。")
             assert options is not None
@@ -477,6 +493,10 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             self.query_one("#setup-next", Static).update("保存并继续")
             self._focus_first_visible_field()
         elif self._page == "web_search_setup":
+            if self._primary.get("provider") == "official":
+                self._web_search = {"configured": False}
+                self._finish()
+                return
             subtitle.update("步骤 3 / 3：联网搜索可选。选择搜索供应商并配置 API Key；百炼还需要先在 MCP 广场开通联网搜索 MCP。")
             assert options is not None
             bailian_source = self._reusable_search_credential("bailian")
@@ -857,8 +877,17 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
 
     def _submit_form(self) -> None:
         if self._page == "official":
-            self._page = "source"
-            self._render_page()
+            if self._verifying_primary:
+                return
+            email = self.query_one("#setup-url", Input).value.strip()
+            password = self.query_one("#setup-key", Input).value
+            if not email or not password:
+                self.query_one("#setup-error", Static).update("请输入邮箱和密码。")
+                return
+            self._verifying_primary = True
+            self.query_one("#setup-error", Static).update("正在登录官方账户…")
+            self._set_actions(next_visible=False, back_visible=False)
+            self.run_worker(self._verify_official_login(email, password), exclusive=True)
             return
         if self._page == "primary_form":
             if self._verifying_primary:
@@ -907,6 +936,37 @@ class FirstRunSetupScreen(Screen[dict[str, Any] | None]):
             self.query_one("#setup-key", Input).disabled = True
             self._set_actions(next_visible=False, back_visible=False)
             self.run_worker(self._verify_web_search_connection(values), exclusive=True)
+
+    async def _verify_official_login(self, email: str, password: str) -> None:
+        from aero.core.official_account import (
+            OfficialAccountError,
+            OfficialAccountSession,
+            relay_llm_url,
+        )
+
+        session = OfficialAccountSession()
+        try:
+            await session.login(email, password)
+        except OfficialAccountError as exc:
+            self._verifying_primary = False
+            self._set_actions(next_visible=True, back_visible=True)
+            self.query_one("#setup-next", Static).update("登录并继续")
+            self.query_one("#setup-error", Static).update(str(exc))
+            self.query_one("#setup-key", Input).value = ""
+            self.query_one("#setup-key", Input).focus()
+            return
+        finally:
+            await session.close()
+        self._verifying_primary = False
+        self._primary = {
+            "provider": "official",
+            "model": "auto",
+            "base_url": relay_llm_url(),
+            "api_key": "",
+        }
+        self._primary_supports_vision = False
+        self._page = "vision_mode"
+        self._render_page()
 
     async def _verify_primary_connection(self, values: dict[str, str]) -> None:
         """Block setup until the chosen endpoint accepts its API key and model."""

@@ -114,6 +114,8 @@ class LLMClient:
     def __init__(self, config: LLMConfig):
         self.config = config
         self._client = httpx.AsyncClient(timeout=120)
+        self._official_session = None
+        self.relay_turn_id = ""
         self.last_usage: dict | None = None
         self.last_search_references: list[str] = []
         self.last_search_performed = False
@@ -121,6 +123,18 @@ class LLMClient:
 
     async def close(self):
         await self._client.aclose()
+        if self._official_session is not None:
+            await self._official_session.close()
+
+    async def _request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+        if self.config.provider != "official":
+            return self._headers()
+        if self._official_session is None:
+            from aero.core.official_account import OfficialAccountSession
+
+            self._official_session = OfficialAccountSession()
+        token = await self._official_session.access_token(force_refresh=force_refresh)
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async def chat(self, messages: list[Message]) -> str:
         """Send messages to LLM and return text response."""
@@ -133,7 +147,7 @@ class LLMClient:
         """Stream text tokens from LLM."""
         self.last_search_references = []
         self.last_search_performed = False
-        headers = self._headers()
+        headers = await self._request_headers()
         body = self._request_body(messages, stream=True)
 
         logger.info("llm.stream", model=self.config.model)
@@ -146,6 +160,13 @@ class LLMClient:
                 async with self._client.stream(
                     "POST", self.config.endpoint, json=body, headers=headers
                 ) as response:
+                    if response.status_code == 401 and self.config.provider == "official":
+                        if attempt < _TRANSIENT_RETRIES:
+                            headers = await self._request_headers(force_refresh=True)
+                            continue
+                        raise RuntimeError(
+                            "Aerolytica 官方账户登录已失效，请使用 /login 重新登录。"
+                        )
                     await _raise_for_status_stream(response)
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "):
@@ -209,7 +230,7 @@ class LLMClient:
         """
         self.last_search_references = []
         self.last_search_performed = False
-        headers = self._headers()
+        headers = await self._request_headers()
         body = self._request_body(messages, tools=tools, stream=True)
 
         logger.info("llm.stream_tools", model=self.config.model, tool_count=len(tools))
@@ -225,6 +246,13 @@ class LLMClient:
                 async with self._client.stream(
                     "POST", self.config.endpoint, json=body, headers=headers
                 ) as response:
+                    if response.status_code == 401 and self.config.provider == "official":
+                        if attempt < _TRANSIENT_RETRIES:
+                            headers = await self._request_headers(force_refresh=True)
+                            continue
+                        raise RuntimeError(
+                            "Aerolytica 官方账户登录已失效，请使用 /login 重新登录。"
+                        )
                     await _raise_for_status_stream(response)
                     async for line in response.aiter_lines():
                         if not line.startswith("data: "):
@@ -359,7 +387,7 @@ class LLMClient:
     ) -> dict:
         self.last_search_references = []
         self.last_search_performed = False
-        headers = self._headers()
+        headers = await self._request_headers()
         body = self._request_body(messages, tools=tools, stream=False)
         endpoint = self.config.endpoint
 
@@ -369,6 +397,13 @@ class LLMClient:
             try:
                 self.last_request_started_at = datetime.now(timezone.utc)
                 resp = await self._client.post(endpoint, json=body, headers=headers)
+                if resp.status_code == 401 and self.config.provider == "official":
+                    if attempt < _TRANSIENT_RETRIES:
+                        headers = await self._request_headers(force_refresh=True)
+                        continue
+                    raise RuntimeError(
+                        "Aerolytica 官方账户登录已失效，请使用 /login 重新登录。"
+                    )
                 _raise_for_status(resp)
                 return resp.json()
             except _TRANSIENT_HTTP_ERRORS as e:
@@ -399,6 +434,8 @@ class LLMClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = "auto"
+        if self.config.provider == "official" and self.relay_turn_id:
+            body["relay_turn_id"] = self.relay_turn_id
         return body
 
     def _dashscope_request_body(
@@ -762,6 +799,11 @@ def _raise_for_status(response: httpx.Response) -> None:
         ):
             provider = _provider_name_from_response(e.response)
             suffix = f" 请求 ID：{request_id}。" if request_id else ""
+            if "aerolytica.skyviewor.team" in (e.response.request.url.host or ""):
+                raise RuntimeError(
+                    "Aerolytica 官方账户余额不足或当前套餐额度已用尽。"
+                    f"请使用 /account 查看可用额度。{suffix}"
+                ) from e
             raise RuntimeError(
                 f"{provider}账户余额不足或当前套餐额度已用尽，无法调用模型。"
                 f"请登录{provider}开放平台充值或检查可用额度后重试。{suffix}"

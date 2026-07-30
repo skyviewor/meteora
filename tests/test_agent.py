@@ -1085,6 +1085,77 @@ def test_bailian_search_exposes_external_search_tool():
     assert agent._external_web_search_block_reason("search_literature") is None
 
 
+def test_official_provider_uses_relay_search_instead_of_external_tool():
+    from aero.agent.loop import AgentLoop
+    from aero.agent.system_prompt import build_system_prompt
+    from aero.toolbox import builtin_tools  # noqa: F401
+
+    config = AeroConfig.create_default()
+    config.llm.provider = "official"
+    config.llm.model = "auto"
+    config.web_search.enabled = True
+    agent = AgentLoop(config)
+
+    allowed = {tool["function"]["name"] for tool in agent._allowed_tools()}
+    prompt = build_system_prompt(config)
+
+    assert "search_web" not in allowed
+    assert "check_web_search_status" not in allowed
+    assert "search_literature" in allowed
+    assert "官方渠道通过 Relay 托管的 MCP 提供联网搜索" in prompt
+    assert agent._external_web_search_block_reason("search_web") is not None
+    assert agent._external_web_search_block_reason("search_literature") is None
+
+
+@pytest.mark.asyncio
+async def test_official_provider_loads_and_executes_relay_mcp_tool():
+    from aero.agent.loop import AgentLoop
+    from aero.core.types import ToolCall
+    from aero.toolbox import builtin_tools  # noqa: F401
+
+    remote_tool = {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web",
+            "parameters": {"type": "object"},
+        },
+    }
+
+    class StubMcp:
+        async def list_tools(self):
+            return [remote_tool]
+
+        async def call(self, name, arguments):
+            assert name == "web_search"
+            assert arguments == {"query": "今天最新台风"}
+            return {"content": "来自官方 MCP 的结果", "is_error": False}
+
+        async def close(self):
+            return None
+
+    config = AeroConfig.create_default()
+    config.llm.provider = "official"
+    config.llm.model = "auto"
+    config.web_search.enabled = True
+    agent = AgentLoop(config)
+    agent._official_mcp = StubMcp()
+
+    tools = await agent._tools_for_turn()
+    content = await agent._call_official_mcp(
+        ToolCall(
+            id="call_1",
+            name="web_search",
+            arguments={"query": "今天最新台风"},
+        )
+    )
+
+    assert remote_tool in tools
+    assert content == "来自官方 MCP 的结果"
+    assert agent._is_official_mcp_tool("web_search") is True
+    await agent.close()
+
+
 def test_agent_applies_llm_config_update(tmp_path, monkeypatch):
     from aero.agent.loop import AgentLoop
     from aero.core.config import clear_llm_api_key, save_llm_api_key

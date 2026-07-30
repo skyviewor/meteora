@@ -35,14 +35,14 @@ from textual.geometry import Offset
 from textual.screen import ModalScreen
 from textual.scrollbar import ScrollBarRender
 from textual.widgets import (
+    Button,
+    Input,
     ListItem,
     ListView,
     Markdown,
-    Input,
     OptionList,
     Static,
     TextArea,
-    Button,
 )
 from textual.widgets._markdown import MarkdownBullet, MarkdownBulletList, MarkdownListItem
 from textual.widgets._option_list import Option
@@ -93,6 +93,7 @@ from aero.core.config import (
 )
 from aero.core.debug_log import configure_debug_logging, debug_log
 from aero.core.llm_providers import (
+    OFFICIAL_ACCOUNT_UI_ENABLED,
     get_provider_preset,
     model_alias_for_provider,
     normalize_provider_id,
@@ -720,6 +721,72 @@ class SecretInputScreen(ModalScreen[str | None]):
             self.action_submit()
         else:
             self.action_cancel()
+
+
+class OfficialLoginScreen(ModalScreen[dict[str, str] | None]):
+    """Collect official-account credentials without retaining the password."""
+
+    CSS = """
+    OfficialLoginScreen {
+        align: center middle;
+        background: $background 70%;
+    }
+    #official-login-dialog {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        border: solid #5dade2;
+        background: $surface;
+    }
+    #official-login-dialog Input {
+        margin: 1 0 0 0;
+    }
+    #official-login-actions {
+        height: 3;
+        margin-top: 1;
+    }
+    #official-login-actions Button {
+        margin-right: 1;
+    }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "取消", show=False)]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="official-login-dialog"):
+            yield Static("登录 Aerolytica 官方账户")
+            yield Static(
+                "登录后可使用官方模型服务并查询账户额度。",
+                classes="setup-label",
+            )
+            yield Input(placeholder="邮箱", id="official-email")
+            yield Input(placeholder="密码", password=True, id="official-password")
+            with Horizontal(id="official-login-actions"):
+                yield Button("登录", id="official-login-submit", variant="primary")
+                yield Button("取消", id="official-login-cancel")
+
+    @on(Button.Pressed, "#official-login-submit")
+    def submit(self) -> None:
+        email = self.query_one("#official-email", Input).value.strip()
+        password = self.query_one("#official-password", Input).value
+        if not email or not password:
+            self.notify("请输入邮箱和密码。", severity="warning")
+            return
+        self.dismiss({"email": email, "password": password})
+
+    @on(Button.Pressed, "#official-login-cancel")
+    def cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Input.Submitted)
+    def submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "official-email":
+            self.query_one("#official-password", Input).focus()
+        else:
+            self.submit()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class HelpScreen(ModalScreen[None]):
@@ -1645,6 +1712,7 @@ class AeroApp(App):
         self._footer_status: Static | None = None
         self._footer_status_token = 0
         self._footer_temp_text = ""
+        self._official_available_credits: str | None = None
         self._subagent_notice_until = 0.0
         self._subagent_footer_active = False
         self._subagent_footer_frame = 0
@@ -1720,6 +1788,8 @@ class AeroApp(App):
         self._footer_status = self.query_one("#footer-status", Static)
         self._refresh_commands()
         self._set_input_focus_style(True)
+        if self.config.llm.provider == "official":
+            self.run_worker(self._refresh_official_credits(), exclusive=False)
         active_experiment = self._get_experiment_mgr().active()
         if active_experiment is not None:
             self._load_experiment_slot(active_experiment["id"])
@@ -2117,6 +2187,11 @@ class AeroApp(App):
                 model=_display_vision_model_name(vision_config.model),
                 provider=_display_vision_provider_name(vision_config.provider),
             )
+        from aero.core.official_account import load_official_session
+
+        official = load_official_session()
+        if official.is_logged_in:
+            text += f"\n官方账户：已登录 {official.email or official.user_id}"
         return f"[dim]{text}[/dim]" if markup else text
 
     def _input_meta_text(self) -> str:
@@ -2139,6 +2214,15 @@ class AeroApp(App):
             text += _usage_meta_text(
                 self.agent.tracker,
                 self.config.llm.model,
+                include_cost=self.config.llm.provider != "official",
+            )
+        if (
+            self.config.llm.provider == "official"
+            and self._official_available_credits is not None
+        ):
+            text += (
+                " [dim]|[/dim] [dim]剩余额度[/dim] "
+                f"{escape(self._official_available_credits)} credits"
             )
         return text
 
@@ -2461,6 +2545,26 @@ class AeroApp(App):
 
         if text == "/provider" or text.startswith("/provider "):
             self._handle_provider_command(text)
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/login" and OFFICIAL_ACCOUNT_UI_ENABLED:
+            await self._handle_official_login()
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/logout" and OFFICIAL_ACCOUNT_UI_ENABLED:
+            await self._handle_official_logout()
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text == "/account" and OFFICIAL_ACCOUNT_UI_ENABLED:
+            await self._handle_official_account()
+            self.query_one("#user-input", TextArea).focus()
+            return
+
+        if text in {"/login", "/logout", "/account"}:
+            self._set_footer_status("当前版本暂未开放官方账户功能。")
             self.query_one("#user-input", TextArea).focus()
             return
 
@@ -3103,6 +3207,15 @@ class AeroApp(App):
             ("/instructions", t("cmd.instructions", self.config.language)),
             ("/subagent", t("cmd.subagent", self.config.language)),
         ]
+        if OFFICIAL_ACCOUNT_UI_ENABLED:
+            self._commands_list.extend(
+                [
+                    ("/account", "查看官方账户与额度"),
+                    ("/login", "登录 Aerolytica 官方账户"),
+                    ("/logout", "退出 Aerolytica 官方账户"),
+                ]
+            )
+            self._commands_list.sort(key=lambda command: command[0])
         self._secondary_commands_list = [
             ("/websearch on", "开启网页搜索"),
             ("/websearch off", "关闭网页搜索"),
@@ -3243,6 +3356,129 @@ class AeroApp(App):
             )
             return
         self._set_provider(parts[1].strip())
+
+    async def _handle_official_login(self) -> None:
+        from aero.core.official_account import (
+            OfficialAccountError,
+            OfficialAccountSession,
+            relay_llm_url,
+        )
+
+        credentials = await self.push_screen_wait(OfficialLoginScreen())
+        if credentials is None:
+            return
+        session = OfficialAccountSession()
+        self._set_footer_status("正在登录 Aerolytica 官方账户…")
+        try:
+            account = await session.login(credentials["email"], credentials["password"])
+        except OfficialAccountError as exc:
+            self.notify(str(exc), severity="error", timeout=5)
+            self._set_footer_status(str(exc))
+            return
+        finally:
+            await session.close()
+
+        self.config.llm.provider = "official"
+        self.config.llm.model = "auto"
+        self.config.llm.base_url = relay_llm_url()
+        self.config.llm.supports_vision = False
+        self.config.llm.apply_active_provider_defaults()
+        save_llm_profile("official", "", "auto", self.config.llm.base_url)
+        if self.persist_config:
+            _save_config(self.config)
+        self._init_agent()
+        await self._refresh_official_credits()
+        self._refresh_model_info()
+        self._set_footer_status(
+            f"已登录 {account.email}，当前使用 Aerolytica 官方模型。"
+        )
+
+    async def _handle_official_logout(self) -> None:
+        from aero.core.official_account import OfficialAccountSession
+
+        session = OfficialAccountSession()
+        if not session.data.is_logged_in:
+            await session.close()
+            self._set_footer_status("当前未登录 Aerolytica 官方账户。")
+            return
+        try:
+            revoked = await session.logout()
+        except Exception:
+            revoked = False
+        finally:
+            await session.close()
+        message = (
+            "已退出 Aerolytica 官方账户。"
+            if revoked
+            else "已清除本地登录；服务端会话撤销状态未确认。"
+        )
+        if self.config.llm.provider == "official":
+            message += (
+                " 当前仍选择官方模型，请重新登录，"
+                "或使用 `/provider` 切换模型服务。"
+            )
+        self._official_available_credits = None
+        self._refresh_model_info()
+        self._set_footer_status(message)
+
+    async def _handle_official_account(self) -> None:
+        from aero.core.official_account import OfficialAccountError, OfficialAccountSession
+
+        session = OfficialAccountSession()
+        if not session.data.is_logged_in:
+            await session.close()
+            self._set_footer_status("请先使用 `/login` 登录 Aerolytica 官方账户。")
+            return
+        try:
+            user, credits = await asyncio.gather(session.me(), session.credits())
+        except OfficialAccountError as exc:
+            self.notify(str(exc), severity="error", timeout=5)
+            self._set_footer_status(str(exc))
+            return
+        finally:
+            await session.close()
+        subscription = credits.get("subscription")
+        subscription = subscription if isinstance(subscription, dict) else {}
+        email = str(user.get("email") or session.data.email or "未知")
+        available = credits.get("available_credits", "未知")
+        self._official_available_credits = _format_credit_balance(available)
+        reserved = credits.get("reserved_credits", "未知")
+        plan = subscription.get("plan_name") or subscription.get("plan_id") or "无"
+        period_end = subscription.get("period_end") or "—"
+        message = (
+            "### Aerolytica 官方账户\n\n"
+            f"- 邮箱：`{email}`\n"
+            f"- 套餐：{plan}\n"
+            f"- 可用额度：{available} credits\n"
+            f"- 冻结额度：{reserved} credits\n"
+            f"- 当前周期结束：{period_end}"
+        )
+        self.query_one("#chat-area", VerticalScroll).mount(Markdown(message))
+        self._refresh_model_info()
+
+    async def _refresh_official_credits(self) -> None:
+        """Refresh the official balance without making chat depend on billing."""
+        from aero.core.official_account import OfficialAccountSession
+
+        if self.config.llm.provider != "official":
+            return
+        session = OfficialAccountSession()
+        if not session.data.is_logged_in:
+            self._official_available_credits = None
+            await session.close()
+            self._refresh_model_info()
+            return
+        try:
+            credits = await session.credits()
+        except Exception as exc:
+            debug_log("official_account.credits_refresh_failed", error=repr(exc))
+            return
+        finally:
+            await session.close()
+        self._official_available_credits = _format_credit_balance(
+            credits.get("available_credits")
+        )
+        self._refresh_model_info()
 
     def _handle_variants_command(self, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -3390,6 +3626,12 @@ class AeroApp(App):
 
     async def _handle_websearch_command(self, text: str) -> None:
         """Toggle the explicitly configured external search service."""
+        if self.config.llm.provider == "official":
+            self._set_footer_status(
+                "Aerolytica 官方渠道使用 Relay 托管的 MCP 联网搜索，"
+                "无需配置客户端搜索 API Key。"
+            )
+            return
         from aero.data.web_search import (
             check_bailian_web,
             search_zhipu_web,
@@ -5562,6 +5804,11 @@ class AeroApp(App):
         lang = self.config.language
         previous_provider = self.config.llm.provider
         provider = normalize_provider_id(value)
+        if provider == "official" and not OFFICIAL_ACCOUNT_UI_ENABLED:
+            self.query_one("#chat-area", VerticalScroll).mount(
+                Static("[error]当前版本暂未开放 Aerolytica 官方模型。[/error]")
+            )
+            return
         preset = get_provider_preset(provider)
         chat = self.query_one("#chat-area", VerticalScroll)
         if preset is None and provider != "custom":
@@ -5578,6 +5825,8 @@ class AeroApp(App):
                 provider_config.model = preset.default_model
             self.config.llm.use_provider_settings()
         self._sync_agent_llm_config()
+        if provider != "official":
+            self._official_available_credits = None
         if self.persist_config:
             _save_config(self.config)
         self._refresh_model_info()
@@ -5588,12 +5837,22 @@ class AeroApp(App):
         missing_api_key = (
             previous_provider != provider
             and not self.config.llm.active_api_key()
+            and provider != "official"
         )
+        from aero.core.official_account import load_official_session
+
+        missing_official_login = provider == "official" and not load_official_session().is_logged_in
         if missing_api_key:
             status += "，请完成 API Key 配置"
+        elif missing_official_login:
+            status += "，请登录官方账户"
         self._set_footer_status(status)
         if missing_api_key:
             self.call_after_refresh(self._open_provider_setup, previous_provider)
+        elif missing_official_login:
+            self.run_worker(self._handle_official_login(), exclusive=True)
+        elif provider == "official":
+            self.run_worker(self._refresh_official_credits(), exclusive=False)
 
     def _set_reasoning_effort(self, value: str) -> None:
         lang = self.config.language
@@ -6048,6 +6307,8 @@ class AeroApp(App):
                 self._main_run_state = None
                 self._stop_activity()
                 self.sub_title = self._ready_subtitle()
+                if self.config.llm.provider == "official":
+                    await self._refresh_official_credits()
                 self._refresh_model_info()
                 self._auto_save_session()
                 self._streaming_text = False
@@ -6527,6 +6788,10 @@ def _save_user_theme(theme: str) -> None:
 
 def _config_needs_llm_setup(config: AeroConfig) -> bool:
     """A primary model is required before an interactive chat can begin."""
+    if config.llm.provider == "official":
+        from aero.core.official_account import load_official_session
+
+        return not load_official_session().is_logged_in
     api_key = config.llm.active_api_key()
     return not api_key or api_key.startswith("$")
 
@@ -7028,7 +7293,12 @@ def _vision_configured(config: AeroConfig) -> bool:
     return vision_is_configured(config)
 
 
-def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
+def _usage_meta_text(
+    tracker: TokenTracker,
+    llm_model: str,
+    *,
+    include_cost: bool = True,
+) -> str:
     ctx_win = context_window_for(llm_model)
     ctx_tokens = tracker.current_prompt_tokens or tracker.total_tokens
     context_text = f"[dim]上下文[/dim] {escape(format_token_count(ctx_tokens))}"
@@ -7040,9 +7310,17 @@ def _usage_meta_text(tracker: TokenTracker, llm_model: str) -> str:
     if hit_ratio > 0:
         parts.append(f"[dim]命中缓存[/dim] {hit_ratio:.0%}")
     cost = tracker.total_cost()
-    if cost > 0:
+    if include_cost and cost > 0:
         parts.append(f"[dim]会话累计[/dim] {escape(format_cost(cost))}")
     return " [dim]|[/dim] " + " [dim]·[/dim] ".join(parts)
+
+
+def _format_credit_balance(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "未知"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
 
 
 def _billing_markdown(tracker: TokenTracker, language: str = "zh") -> str:

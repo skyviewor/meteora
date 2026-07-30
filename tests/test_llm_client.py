@@ -197,6 +197,73 @@ def test_request_body_can_limit_completion_tokens_for_connectivity_check():
     assert body["max_tokens"] == 1
 
 
+def test_official_request_body_includes_stable_relay_turn_id():
+    client = LLMClient(LLMConfig(provider="official", model="auto"))
+    client.relay_turn_id = "turn-stable"
+
+    body = client._request_body([Message(role="user", content="Hi")])
+
+    assert body["relay_turn_id"] == "turn-stable"
+
+
+@pytest.mark.asyncio
+async def test_official_relay_uses_jwt_and_refreshes_once_after_401(monkeypatch):
+    token_requests: list[bool] = []
+
+    class StubOfficialSession:
+        async def access_token(self, *, force_refresh=False):
+            token_requests.append(force_refresh)
+            return "jwt-refreshed" if force_refresh else "jwt-initial"
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "aero.core.official_account.OfficialAccountSession",
+        StubOfficialSession,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers["Authorization"] == "Bearer jwt-initial":
+            return httpx.Response(401, json={"detail": "expired"}, request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}}]},
+            request=request,
+        )
+
+    client = LLMClient(
+        LLMConfig(
+            provider="official",
+            model="auto",
+            base_url="https://llm.aerolytica.skyviewor.team/v1",
+        )
+    )
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    result = await client.chat([Message(role="user", content="Hi")])
+
+    assert result == "ok"
+    assert token_requests == [False, True]
+    await client.close()
+
+
+def test_official_relay_402_points_to_account_command():
+    request = httpx.Request(
+        "POST",
+        "https://llm.aerolytica.skyviewor.team/v1/chat/completions",
+    )
+    response = httpx.Response(
+        402,
+        json={"error": {"code": "insufficient_quota"}},
+        request=request,
+    )
+
+    with pytest.raises(RuntimeError, match="/account"):
+        _raise_for_status(response)
+
+
 def obsolete_dashscope_multimodal_native_search_body_is_used_for_qwen37_flash():
     client = LLMClient(
         LLMConfig(

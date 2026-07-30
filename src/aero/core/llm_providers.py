@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+# Keep the official account implementation dormant until the public rollout.
+# This controls discoverability only; the provider/session code remains available.
+OFFICIAL_ACCOUNT_UI_ENABLED = False
+
+
 @dataclass(frozen=True)
 class LLMProviderPreset:
     id: str
@@ -14,6 +19,17 @@ class LLMProviderPreset:
     models: tuple[str, ...]
     api_key_url: str
     api_key_hint: str
+
+
+OFFICIAL_LLM_PROVIDER = LLMProviderPreset(
+    id="official",
+    name="Aerolytica 官方",
+    base_url="https://llm.aerolytica.skyviewor.team/v1",
+    default_model="auto",
+    models=("auto",),
+    api_key_url="",
+    api_key_hint="使用 Aerolytica 官方账户登录，无需配置 API Key。",
+)
 
 
 BUILTIN_LLM_PROVIDERS: dict[str, LLMProviderPreset] = {
@@ -75,6 +91,7 @@ class ModelMetadata:
 
 
 MODEL_METADATA: dict[tuple[str, str], ModelMetadata] = {
+    ("official", "auto"): ModelMetadata("官方路由 · 自动"),
     ("deepseek", "deepseek-v4-flash"): ModelMetadata("文本 · 高性价比"),
     ("deepseek", "deepseek-v4-pro"): ModelMetadata("文本 · 旗舰"),
     ("bailian", "qwen3.7-max"): ModelMetadata("文本 · 旗舰"),
@@ -136,7 +153,10 @@ def model_alias_for_provider(provider: str) -> tuple[str, str] | None:
 
 
 def get_provider_preset(provider: str) -> LLMProviderPreset | None:
-    return BUILTIN_LLM_PROVIDERS.get(normalize_provider_id(provider))
+    provider_id = normalize_provider_id(provider)
+    if provider_id == "official":
+        return OFFICIAL_LLM_PROVIDER
+    return BUILTIN_LLM_PROVIDERS.get(provider_id)
 
 
 def provider_options() -> list[tuple[str, str]]:
@@ -145,10 +165,13 @@ def provider_options() -> list[tuple[str, str]]:
     Model selection is a separate action, so showing a model here is
     misleading when a saved provider profile uses a different one.
     """
-    return [
+    options = [
         (preset.id, preset.name)
         for preset in BUILTIN_LLM_PROVIDERS.values()
     ]
+    if OFFICIAL_ACCOUNT_UI_ENABLED:
+        options.insert(0, (OFFICIAL_LLM_PROVIDER.id, OFFICIAL_LLM_PROVIDER.name))
+    return options
 
 
 def model_summary(provider: str, model: str) -> str:

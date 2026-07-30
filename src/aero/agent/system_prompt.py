@@ -27,11 +27,16 @@ def build_system_prompt(
     memo_context: str = "",
 ) -> str:
     lang = language or getattr(config, "language", "zh")
-    tools_prompt = _build_tools_section(config.mode)
+    excluded_tools = (
+        {"search_web", "check_web_search_status"}
+        if config.llm.provider == "official"
+        else set()
+    )
+    tools_prompt = _build_tools_section(config.mode, excluded_tools=excluded_tools)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     if lang == "zh":
-        return _zh_prompt(
+        prompt = _zh_prompt(
             config,
             tools_prompt,
             now,
@@ -40,16 +45,31 @@ def build_system_prompt(
             experiment_context,
             memo_context,
         )
-    return _intl_prompt(
-        config,
-        tools_prompt,
-        now,
-        lang,
-        skill_context,
-        instructions_context,
-        experiment_context,
-        memo_context,
-    )
+    else:
+        prompt = _intl_prompt(
+            config,
+            tools_prompt,
+            now,
+            lang,
+            skill_context,
+            instructions_context,
+            experiment_context,
+            memo_context,
+        )
+    if config.llm.provider == "official":
+        prompt += (
+            "\n\n## Aerolytica 官方 MCP 联网能力\n"
+            "当前官方渠道通过 Relay 托管的 MCP 提供联网搜索。"
+            "官方 MCP 工具会随每轮请求提供，由你根据用户问题自行判断是否调用；"
+            "实时信息或近期事件必须先调用该工具，非实时问题无需调用。"
+            "不要调用客户端自配的百炼或智谱网页搜索服务，"
+            "也不要要求用户配置搜索 API Key。"
+            if lang == "zh"
+            else "\n\n## Aerolytica official MCP web access\n"
+            "Use the MCP tools managed by the official Relay for current information. "
+            "Never use client-configured external web-search services in official mode."
+        )
+    return prompt
 
 
 def _intl_prompt(
@@ -753,11 +773,20 @@ When the `scientific-plotting` skill is active, the following rules are **mandat
     return "\n\n".join(blocks)
 
 
-def _build_tools_section(mode: str = "execute") -> str:
+def _build_tools_section(
+    mode: str = "execute",
+    *,
+    excluded_tools: set[str] | None = None,
+) -> str:
     from aero.data.modes import is_tool_allowed
 
     registry = get_registry()
-    tools = [t for t in registry.list_all() if is_tool_allowed(t.name, mode)]
+    excluded = excluded_tools or set()
+    tools = [
+        tool
+        for tool in registry.list_all()
+        if is_tool_allowed(tool.name, mode) and tool.name not in excluded
+    ]
     if not tools:
         return "(no tools available)"
 

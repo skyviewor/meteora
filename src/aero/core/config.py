@@ -2,6 +2,7 @@
 
 import os
 import re
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -231,8 +232,23 @@ def load_user_secrets() -> dict:
 def save_user_secrets(data: dict) -> None:
     path = user_secrets_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True))
-    path.chmod(0o600)
+    content = yaml.dump(data, default_flow_style=False, allow_unicode=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+        text=True,
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def apply_user_secrets(config: AeroConfig) -> AeroConfig:
@@ -263,7 +279,9 @@ def apply_user_secrets(config: AeroConfig) -> AeroConfig:
             # saved canonical profile wins if both forms exist.
             ordered_providers = sorted(
                 providers.items(),
-                key=lambda item: normalize_provider_id(str(item[0])) == str(item[0]).strip().lower(),
+                key=lambda item: (
+                    normalize_provider_id(str(item[0])) == str(item[0]).strip().lower()
+                ),
             )
             for provider, values in ordered_providers:
                 if not isinstance(values, dict):

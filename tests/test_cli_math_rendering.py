@@ -261,6 +261,27 @@ def test_usage_meta_text_formats_cache_hit_as_status_segment():
     assert "(4%)" not in text
 
 
+def test_usage_meta_text_can_hide_cost_for_official_provider():
+    tracker = TokenTracker(
+        _llm_usage={
+            "deepseek-v4-flash": ModelUsage(
+                prompt_tokens=1000, completion_tokens=100, cached_tokens=0
+            )
+        },
+        current_prompt_tokens=1100,
+    )
+
+    text = _usage_meta_text(
+        tracker,
+        "deepseek-v4-flash",
+        include_cost=False,
+    )
+
+    assert "[dim]上下文[/dim]" in text
+    assert "会话累计" not in text
+    assert "¥" not in text
+
+
 def test_qwen37_plus_pricing_applies_bailian_cache_discount():
     tracker = TokenTracker()
     tracker.add_llm(
