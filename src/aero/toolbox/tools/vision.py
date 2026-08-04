@@ -1,5 +1,7 @@
 """Vision-model configuration and image-analysis tools."""
 
+from contextvars import ContextVar
+
 from aero.core.config import (
     AeroConfig,
     resolved_vision_config,
@@ -23,16 +25,15 @@ def _ensure_vision_client():
     return VisionClient(vision_config), config, vision_config
 
 
-_vision_usage: dict | None = None
+_vision_usage: ContextVar[dict | None] = ContextVar("aero_vision_usage", default=None)
 
 
 def get_vision_usage() -> dict | None:
-    return _vision_usage
+    return _vision_usage.get()
 
 
 def reset_vision_usage() -> None:
-    global _vision_usage
-    _vision_usage = None
+    _vision_usage.set(None)
 
 
 def _vision_error_payload(exc: Exception, *, config, image_paths: list[str], detail: str) -> dict:
@@ -117,8 +118,7 @@ def check_vision_model_config() -> dict:
 async def analyze_image(
     image_paths: list[str], prompt: str, detail: str = "high", force: bool = False
 ) -> dict:
-    global _vision_usage
-    _vision_usage = None
+    _vision_usage.set(None)
     from pathlib import Path
 
     from aero.data.vision_cache import get as cache_get
@@ -140,9 +140,7 @@ async def analyze_image(
             return {"status": "error", "message": f"图片文件不存在：{short_path(path)}"}
 
     if not force:
-        cached = cache_get(
-            image_paths, prompt, vision_config.model, vision_config.cache_ttl_hours
-        )
+        cached = cache_get(image_paths, prompt, vision_config.model, vision_config.cache_ttl_hours)
         if cached:
             return {
                 "status": "success",
@@ -153,11 +151,15 @@ async def analyze_image(
 
     try:
         result = await client.analyze(image_paths, prompt, detail)
-        _vision_usage = client.last_usage
+        _vision_usage.set(client.last_usage)
     except Exception as exc:
         debug_exception(
-            "vision.analyze_failed", exc, provider=vision_config.provider,
-            model=vision_config.model, image_paths=image_paths, detail=detail,
+            "vision.analyze_failed",
+            exc,
+            provider=vision_config.provider,
+            model=vision_config.model,
+            image_paths=image_paths,
+            detail=detail,
         )
         return _vision_error_payload(
             exc,

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -16,7 +18,7 @@ PLANS_DIR_NAME = "plans"
 STATE_FILE = "_plan_state.json"
 FILENAME_PREFIX = "plan"
 
-_current_session_id: str | None = None
+_current_session_id: ContextVar[str | None] = ContextVar("aero_plan_session_id", default=None)
 
 
 def set_session_id(session_id: str | None) -> None:
@@ -24,13 +26,21 @@ def set_session_id(session_id: str | None) -> None:
 
     Called by the CLI layer whenever a session is created, loaded, or cleared.
     """
-    global _current_session_id
-    _current_session_id = session_id
+    _current_session_id.set(session_id)
 
 
 def get_session_id() -> str | None:
     """Return the currently active session id, or None."""
-    return _current_session_id
+    return _current_session_id.get()
+
+
+@contextmanager
+def use_session_id(session_id: str | None):
+    token = _current_session_id.set(session_id)
+    try:
+        yield
+    finally:
+        _current_session_id.reset(token)
 
 
 def _plans_dir(
@@ -38,7 +48,7 @@ def _plans_dir(
     session_id: str | None = None,
 ) -> Path:
     base = Path(project_dir) if project_dir else Path.cwd()
-    sid = session_id if session_id is not None else _current_session_id
+    sid = session_id if session_id is not None else _current_session_id.get()
     if sid:
         return base / PLANS_DIR_NAME / sid
     return base / PLANS_DIR_NAME
@@ -119,11 +129,15 @@ def resolve_plan_path(
     seq = state.get("plan_sequence", 0) + 1
     filename = f"{FILENAME_PREFIX}_{timestamp}_{seq:02d}.md"
     path = _plans_dir(project_dir, session_id=session_id) / filename
-    _save_state({
-        "current_plan": str(path),
-        "locked": False,
-        "plan_sequence": seq,
-    }, project_dir, session_id=session_id)
+    _save_state(
+        {
+            "current_plan": str(path),
+            "locked": False,
+            "plan_sequence": seq,
+        },
+        project_dir,
+        session_id=session_id,
+    )
     return path
 
 

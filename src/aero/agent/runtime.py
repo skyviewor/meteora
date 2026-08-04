@@ -75,7 +75,10 @@ class Runtime:
 
     async def execute(self, tool_func, args: dict) -> ExecutionResult:
         try:
-            result = tool_func(**args)
+            if inspect.iscoroutinefunction(tool_func):
+                result = await tool_func(**args)
+                return ExecutionResult(success=True, result=result)
+            result = await asyncio.to_thread(tool_func, **args)
             if inspect.iscoroutine(result):
                 result = await result
             return ExecutionResult(success=True, result=result)

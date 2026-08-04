@@ -25,6 +25,11 @@ import yaml
 if os.environ.get("AERO_ENABLE_KITTY_KEY") != "1":
     os.environ["TEXTUAL_DISABLE_KITTY_KEY"] = "1"
 
+# The Web server never renders terminal images. Avoid probing terminal escape
+# sequences when ``aero serve`` is invoked from a non-interactive process.
+if len(sys.argv) > 1 and sys.argv[1] == "serve":
+    os.environ["AERO_TEXTUAL_IMAGE_PROTOCOL"] = "0"
+
 from rich.markup import escape
 from rich.table import Table
 from textual import events, on, work
@@ -6739,6 +6744,30 @@ def _load_config() -> AeroConfig:
     return AeroConfig.create_default()
 
 
+def _serve(*, port: int, open_browser: bool) -> None:
+    """Run the local browser workbench without importing Textual widgets."""
+    import webbrowser
+
+    import uvicorn
+
+    from aero.server.app import create_app
+
+    launch_token = secrets.token_urlsafe(32)
+    app, runtime = create_app(Path.cwd(), launch_token=launch_token)
+    url = f"http://127.0.0.1:{port}/?token={launch_token}"
+    print(f"Aerolytica Web UI: {url}")
+    print(f"项目目录: {Path.cwd().resolve()}")
+    print("按 Ctrl+C 停止服务。")
+    if open_browser:
+        with suppress(Exception):
+            webbrowser.open(url)
+    try:
+        uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    finally:
+        with suppress(Exception):
+            asyncio.run(runtime.close())
+
+
 def _save_config(config: AeroConfig) -> None:
     cwd = Path.cwd()
     config.save(cwd / "aero.yaml")
@@ -8484,6 +8513,40 @@ def main():
         app = AeroApp(config, resume_last_session=resume_last_session)
         app.run(mouse=mouse_mode)
 
+    elif cmd == "serve":
+        serve_args = sys.argv[2:]
+        allowed = {"--no-open"}
+        port = 8765
+        index = 0
+        while index < len(serve_args):
+            arg = serve_args[index]
+            if arg == "--no-open":
+                index += 1
+                continue
+            if arg == "--port" and index + 1 < len(serve_args):
+                try:
+                    port = int(serve_args[index + 1])
+                except ValueError:
+                    print("--port 必须是整数")
+                    sys.exit(2)
+                index += 2
+                continue
+            if arg.startswith("--port="):
+                try:
+                    port = int(arg.split("=", 1)[1])
+                except ValueError:
+                    print("--port 必须是整数")
+                    sys.exit(2)
+                index += 1
+                continue
+            print(f"未知参数: {arg}")
+            _print_usage()
+            sys.exit(2)
+        if not 1 <= port <= 65535:
+            print("端口必须在 1 到 65535 之间")
+            sys.exit(2)
+        _serve(port=port, open_browser="--no-open" not in serve_args)
+
     elif cmd == "init":
         _init()
     elif cmd == "setup":
@@ -8551,6 +8614,9 @@ Aero — 气象科研 AI Agent IDE
   aero runtime clean   删除 Aero 私有运行时（不影响项目和用户 Conda）
   aero chat            启动 Textual TUI 对话（支持中文输入和流式输出）
   aero chat --continue 续接当前目录上一次保存的会话（短参数: -c）
+  aero serve           启动本地 Web Agent 工作台（默认端口 8765）
+  aero serve --port N  使用指定端口启动本地 Web 工作台
+  aero serve --no-open 启动服务但不自动打开浏览器
   aero chat --mouse    启用 Textual 鼠标滚轮（默认已启用，保留兼容）
   aero chat --no-mouse 禁用 Textual 鼠标模式，交给终端原生选择/复制
   ↑/↓ 或 PageUp/PageDown  对话中滚动聊天区域

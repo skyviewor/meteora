@@ -17,6 +17,7 @@ pixi.lock
 .vscode/
 .idea/
 .opencode/
+webui/node_modules/
 *.swp
 *.swo
 

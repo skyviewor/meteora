@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 from aero.toolbox.config_access import find_config, find_config_path
 from aero.toolbox.registry import register_tool
 
-_runtime_max_tool_rounds: int | None = None
+_runtime_max_tool_rounds: ContextVar[int | None] = ContextVar(
+    "aero_runtime_max_tool_rounds", default=None
+)
 
 
 @register_tool(
@@ -27,8 +31,7 @@ _runtime_max_tool_rounds: int | None = None
 def set_max_tool_rounds(value: int) -> dict:
     if value < 1:
         return {"status": "error", "message": f"轮数上限必须 >= 1，接收到: {value}"}
-    global _runtime_max_tool_rounds
-    _runtime_max_tool_rounds = value
+    _runtime_max_tool_rounds.set(value)
     config = find_config()
     config.max_tool_rounds = value
     config_path = find_config_path()
@@ -50,13 +53,17 @@ def set_max_tool_rounds(value: int) -> dict:
     },
 )
 def get_max_tool_rounds() -> dict:
-    if _runtime_max_tool_rounds is not None:
-        mt = _runtime_max_tool_rounds
+    runtime_value = _runtime_max_tool_rounds.get()
+    if runtime_value is not None:
+        mt = runtime_value
     else:
         config = find_config()
         mt = getattr(config, "max_tool_rounds", 999)
     return {
         "status": "success",
         "max_tool_rounds": mt,
-        "message": f"当前最大工具调用轮次为 {mt} 轮。可通过 /set max_tool_rounds N 修改（如 /set max_tool_rounds 50）。",
+        "message": (
+            f"当前最大工具调用轮次为 {mt} 轮。可通过 /set max_tool_rounds N 修改"
+            "（如 /set max_tool_rounds 50）。"
+        ),
     }
