@@ -8591,6 +8591,12 @@ def main():
 
         if not clean_runtime(assume_yes="--yes" in runtime_args or "-y" in runtime_args):
             sys.exit(1)
+    elif cmd == "agent":
+        from aero.cli.agent_runner import run_agent_cli
+
+        exit_code = run_agent_cli(sys.argv[2:])
+        if exit_code:
+            sys.exit(exit_code)
     elif cmd in ("-v", "--version", "version"):
         print("Aero 0.1.0")
     elif cmd in ("-h", "--help", "help"):
@@ -8612,6 +8618,10 @@ Aero — 气象科研 AI Agent IDE
   aero setup --full --china-mirror  强制使用国内 Conda/PyPI 镜像
   aero doctor          检查 Aero 私有运行时
   aero runtime clean   删除 Aero 私有运行时（不影响项目和用户 Conda）
+  aero agent register --name ocean [--description "备注"]  注册远程 Agent
+  aero agent list       列出本地 Agent 及在线状态
+  aero agent run [Agent 名称或 Agent ID] [--cloud-memory]  前台常驻并等待云端指令
+  aero agent status [Agent 名称或 Agent ID]  查询指定 Agent 状态
   aero chat            启动 Textual TUI 对话（支持中文输入和流式输出）
   aero chat --continue 续接当前目录上一次保存的会话（短参数: -c）
   aero serve           启动本地 Web Agent 工作台（默认端口 8765）
